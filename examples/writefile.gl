@@ -1,0 +1,36 @@
+// writefile.gl — create/overwrite FILE with remaining args, or stdin if none
+fn main() {
+    if argc < 2 {
+        print("usage: writefile FILE [text...]")
+        print("       echo data | writefile FILE")
+        exit(1)
+    }
+    let fd = open(argv[1], O_WRONLY + O_CREAT + O_TRUNC)
+    if fd < 0 {
+        print("writefile: cannot open", argv[1])
+        exit(1)
+    }
+    if argc == 2 {
+        // no text args → copy stdin until EOF
+        while 1 {
+            let c = readch(STDIN)
+            if c < 0 {
+                break
+            }
+            writech(fd, c)
+        }
+        close(fd)
+        exit(0)
+    }
+    let i = 2
+    while i < argc {
+        if i > 2 {
+            write(fd, " ")
+        }
+        write(fd, argv[i])
+        i = i + 1
+    }
+    write(fd, "\n")
+    close(fd)
+    exit(0)
+}

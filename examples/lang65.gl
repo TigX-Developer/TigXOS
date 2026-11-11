@@ -1,0 +1,35 @@
+// lang65.gl — demo 1.0.65 language growth: for, strings, chars, break/continue
+fn main() {
+    // for loop
+    for let i = 0; i < 5; i = i + 1 {
+        if i == 2 {
+            continue
+        }
+        if i == 4 {
+            break
+        }
+        print("i =", i)
+    }
+
+    // string concat + compare + index + char literal
+    let a = "hel"
+    let b = "lo"
+    let s = a + b
+    print("concat:", s)
+    if s == "hello" {
+        print("compare ok")
+    }
+    let c = s[0]
+    if c == 'h' {
+        print("index + char ok", c)
+    }
+    if s != "world" {
+        print("!= ok")
+    }
+
+    // int ops already worked; char as int
+    let nl = '\n'
+    print("newline code", nl)
+
+    exit(0)
+}

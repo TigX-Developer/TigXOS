@@ -1,0 +1,12 @@
+// loop.tig — control flow demo
+fn main() {
+    let i = 0
+    while i < 5 {
+        print("tick", i)
+        i = i + 1
+    }
+    if getpid() > 0 {
+        print("running in user mode")
+    }
+    exit(0)
+}

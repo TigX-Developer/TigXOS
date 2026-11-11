@@ -1,0 +1,49 @@
+// wc.gl — lines words bytes
+fn main() {
+    if argc < 2 {
+        print("usage: wc FILE")
+        exit(1)
+    }
+    let fd = open(argv[1], O_RDONLY)
+    if fd < 0 {
+        print("wc: cannot open", argv[1])
+        exit(1)
+    }
+    let lines = 0
+    let words = 0
+    let bytes = 0
+    let in_word = 0
+    while 1 {
+        let c = readch(fd)
+        if c < 0 {
+            break
+        }
+        bytes = bytes + 1
+        if c == 10 {
+            lines = lines + 1
+        }
+        if c == 32 {
+            in_word = 0
+        } else {
+            if c == 9 {
+                in_word = 0
+            } else {
+                if c == 10 {
+                    in_word = 0
+                } else {
+                    if c == 13 {
+                        in_word = 0
+                    } else {
+                        if in_word == 0 {
+                            in_word = 1
+                            words = words + 1
+                        }
+                    }
+                }
+            }
+        }
+    }
+    close(fd)
+    print(lines, words, bytes, argv[1])
+    exit(0)
+}

@@ -1,0 +1,5 @@
+// ls.gl — list root with sizes
+fn main() {
+    listdir()
+    exit(0)
+}

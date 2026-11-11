@@ -1,0 +1,30 @@
+# Build products
+*.o
+*.d
+*.bin
+*.elf
+kernel.elf
+os-image.bin
+tigfs.img
+embed_hello.c
+boot.bin
+.arch-stamp
+.tests-stamp
+qemu.log
+
+# User build outputs
+user/*.o
+user/*.d
+user/*.elf
+user/*.gl.c
+
+# Archives / local packs
+*.tar.gz
+*.zip
+
+# Editor / OS junk
+*~
+*.swp
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,13 @@
+// hello.tig — default program seeded as hello.elf (press e)
+fn main() {
+    print("hello from Tig!")
+    print("pid =", getpid())
+    let a = 32
+    let b = 64
+    let c = 128
+    let x = a/2 + b/2 + c/2
+    if x < 128 {
+        print("IDK, what to print, but this is a no.", x)
+    }
+    exit(0)
+}
