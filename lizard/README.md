@@ -1,12 +1,13 @@
-# green lizard — the TigxOS userland language
+# Green Lizard
 
-Source files use `.gl`; the compiler is `glc`. `.tig` is still accepted with a deprecation warning.
+**TigxOS’s native userland language** — sources use `.gl`, compiler is `glc`.
 
-Easy to learn. Mix of **C** (braces, types optional, functions) and **Python**
-(`print`, `let`, no required semicolons).
+A small, easy language that mixes **C-style** structure (braces, functions) with
+**Python-ish** ergonomics (`print`, `let`, no required semicolons).  
+(`.tig` is still accepted with a deprecation warning.)
 
-```
-hello.gl  →  glc  →  hello.gl.c  →  gcc  →  hello.elf  →  spawn on TigxOS
+```text
+examples/hello.gl  →  glc  →  hello.gl.c  →  gcc  →  bin/hello.elf  →  spawn
 ```
 
 ## Quick syntax
