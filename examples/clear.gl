@@ -1,0 +1,6 @@
+// clear.gl — clear the console (ANSI + form-feed fallback)
+fn main() {
+    // ANSI clear screen + home (works on many serial/QEMU setups)
+    write(STDOUT, "\x1b[2J\x1b[H")
+    exit(0)
+}

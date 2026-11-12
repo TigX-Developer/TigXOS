@@ -1,0 +1,28 @@
+// cp.gl — copy SRC to DST
+fn main() {
+    if argc < 3 {
+        print("usage: cp SRC DST")
+        exit(1)
+    }
+    let in = open(argv[1], O_RDONLY)
+    if in < 0 {
+        print("cp: cannot open", argv[1])
+        exit(1)
+    }
+    let out = open(argv[2], O_WRONLY + O_CREAT + O_TRUNC)
+    if out < 0 {
+        print("cp: cannot create", argv[2])
+        close(in)
+        exit(1)
+    }
+    while 1 {
+        let c = readch(in)
+        if c < 0 {
+            break
+        }
+        writech(out, c)
+    }
+    close(in)
+    close(out)
+    exit(0)
+}

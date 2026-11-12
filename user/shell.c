@@ -1,4 +1,4 @@
-/* shell.c — interactive shell for TigxOS V1.1.3 */
+/* shell.c — interactive shell for TigxOS V1.1.4 */
 
 #include "libc.h"
 #include "version.h"
@@ -670,7 +670,9 @@ static void cmd_help(void) {
     shell_puts("Pipe:      cmd1 | cmd2   (concurrent, real pipes)\n");
     shell_puts("Edit:      arrows  Home/End  Del  Bksp  Up/Down history\n");
     shell_puts("Scripts:   # comment   sh script.file\n");
-    shell_puts("Programs:  hello echo loop args cat rm ls wc writefile lang65 exitn\n");
+    shell_puts("Programs:  hello echo loop args cat rm ls wc writefile\n");
+    shell_puts("           lang65 exitn cp mv touch head clear tee sleep\n");
+    shell_puts("           basename dirname\n");
     shell_puts("Paths:     relative use cwd; absolute start with / ; PATH=bin:.\n");
     shell_puts("Layout:    programs live as bin/NAME.elf (PATH search finds them)\n");
 }
@@ -733,7 +735,7 @@ static int try_spawn_one(const char *name, char **argv, char **envp) {
 }
 
 /*
- * PATH search (v1.1.3): if name contains no '/', walk PATH components.
+ * PATH search (v1.1.4): if name contains no '/', walk PATH components.
  * Default PATH is "bin:." (set at shell start if unset).
  * Each component is joined with '/' + name (and name.elf).
  */
@@ -747,7 +749,7 @@ static int try_spawn(const char *name, char **argv) {
         return try_spawn_one(name, argv, envp);
 
     /*
-     * PATH search only (v1.1.3 fix): do NOT try cwd first unless "." is in PATH.
+     * PATH search only (v1.1.4 fix): do NOT try cwd first unless "." is in PATH.
      * Components are tried in order. Over-long components are skipped (consumed).
      */
     /* NULL = unset → default; empty string = explicitly empty (no search). */
@@ -1625,7 +1627,7 @@ int main(int argc, char **argv) {
     (void)argv;
     char line[LINE_MAX];
 
-    /* Standard layout (v1.1.3): programs live under bin/ ; PATH defaults to bin:. */
+    /* Standard layout (v1.1.4): programs live under bin/ ; PATH defaults to bin:. */
     if (!var_get("PATH"))
         var_set("PATH", "bin:.", 1);
 

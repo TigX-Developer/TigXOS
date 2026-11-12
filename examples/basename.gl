@@ -1,0 +1,36 @@
+// basename.gl — strip directory prefix from path
+fn main() {
+    if argc < 2 {
+        print("usage: basename PATH")
+        exit(1)
+    }
+    let p = argv[1]
+    let n = len(p)
+    if n == 0 {
+        print(".")
+        exit(0)
+    }
+    // skip trailing slashes
+    while n > 1 {
+        if p[n - 1] != 47 {
+            break
+        }
+        n = n - 1
+    }
+    let start = 0
+    let i = 0
+    while i < n {
+        if p[i] == 47 {
+            start = i + 1
+        }
+        i = i + 1
+    }
+    // print from start to n
+    let j = start
+    while j < n {
+        writech(STDOUT, p[j])
+        j = j + 1
+    }
+    write(STDOUT, "\n")
+    exit(0)
+}

@@ -1,0 +1,31 @@
+// sleep.gl — sleep for N seconds (integer)
+fn main() {
+    if argc < 2 {
+        print("usage: sleep SECONDS")
+        exit(1)
+    }
+    let s = argv[1]
+    let sec = 0
+    let j = 0
+    while j < len(s) {
+        let d = s[j] - 48
+        if d < 0 {
+            print("sleep: bad number")
+            exit(1)
+        }
+        if d > 9 {
+            print("sleep: bad number")
+            exit(1)
+        }
+        sec = sec * 10 + d
+        j = j + 1
+    }
+    if sec < 0 {
+        sec = 0
+    }
+    if sec > 3600 {
+        sec = 3600
+    }
+    sleep(sec * 1000)
+    exit(0)
+}

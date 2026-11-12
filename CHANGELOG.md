@@ -1,5 +1,23 @@
 # TigxOS changelog
 
+## 1.1.4 — Tools – Round 2
+New userland utilities (Green Lizard → `bin/NAME.elf`), installed via PATH:
+
+| Tool | Purpose |
+|------|---------|
+| `cp` | Copy file |
+| `mv` | Move/rename (copy + unlink on flat TigFS) |
+| `touch` | Create empty file(s) |
+| `head` | First N lines (`-n N`, default 10) |
+| `clear` | Clear console (ANSI) |
+| `tee` | Copy stdin to stdout and a file |
+| `sleep` | Sleep N seconds |
+| `basename` | Strip directory prefix |
+| `dirname` | Directory part of a path string |
+
+Round 1 tools unchanged. Still flat TigFS (no real directories).
+
+
 ## 1.1.3 — Standard filesystem layout and PATH
 - **Layout**: user programs installed as `bin/NAME.elf` on TigFS (makefile + mktigfs).
   `shell.elf` and `args.elf` also kept at root for compatibility.

@@ -1,0 +1,44 @@
+// dirname.gl — directory part of path (flat-FS string helper)
+fn main() {
+    if argc < 2 {
+        print("usage: dirname PATH")
+        exit(1)
+    }
+    let p = argv[1]
+    let n = len(p)
+    if n == 0 {
+        print(".")
+        exit(0)
+    }
+    // skip trailing slashes
+    while n > 1 {
+        if p[n - 1] != 47 {
+            break
+        }
+        n = n - 1
+    }
+    // find last slash
+    let last = -1
+    let i = 0
+    while i < n {
+        if p[i] == 47 {
+            last = i
+        }
+        i = i + 1
+    }
+    if last < 0 {
+        print(".")
+        exit(0)
+    }
+    if last == 0 {
+        print("/")
+        exit(0)
+    }
+    let j = 0
+    while j < last {
+        writech(STDOUT, p[j])
+        j = j + 1
+    }
+    write(STDOUT, "\n")
+    exit(0)
+}

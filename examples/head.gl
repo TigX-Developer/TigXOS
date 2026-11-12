@@ -1,0 +1,54 @@
+// head.gl — first N lines (default 10)
+fn main() {
+    if argc < 2 {
+        print("usage: head [-n N] FILE")
+        exit(1)
+    }
+    let n = 10
+    let file_i = 1
+    if argc >= 4 {
+        if argv[1] == "-n" {
+            // parse small positive integer from argv[2]
+            let s = argv[2]
+            let v = 0
+            let j = 0
+            while j < len(s) {
+                let d = s[j] - 48
+                if d < 0 {
+                    print("head: bad -n")
+                    exit(1)
+                }
+                if d > 9 {
+                    print("head: bad -n")
+                    exit(1)
+                }
+                v = v * 10 + d
+                j = j + 1
+            }
+            n = v
+            file_i = 3
+        }
+    }
+    if file_i >= argc {
+        print("usage: head [-n N] FILE")
+        exit(1)
+    }
+    let fd = open(argv[file_i], O_RDONLY)
+    if fd < 0 {
+        print("head: cannot open", argv[file_i])
+        exit(1)
+    }
+    let lines = 0
+    while lines < n {
+        let c = readch(fd)
+        if c < 0 {
+            break
+        }
+        writech(STDOUT, c)
+        if c == 10 {
+            lines = lines + 1
+        }
+    }
+    close(fd)
+    exit(0)
+}

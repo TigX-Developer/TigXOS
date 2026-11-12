@@ -2,7 +2,7 @@
 
 **A dual-architecture hobby OS — thin kernel in C, userland in C and Green Lizard.**
 
-[![Version](https://img.shields.io/badge/version-1.1.3-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.1.4-blue)](CHANGELOG.md)
 [![Arch](https://img.shields.io/badge/arch-i386%20%7C%20x86__64-green)](#build)
 [![Lang](https://img.shields.io/badge/kernel-C-orange)](#languages)
 [![Lang](https://img.shields.io/badge/userland-C%20%2B%20Green%20Lizard-purple)](#languages)
@@ -59,14 +59,15 @@ See **[lizard/README.md](lizard/README.md)** for syntax, `argc`/`argv`, and limi
 
 ---
 
-## Features (v1.1.3 — Foundations)
+## Features (v1.1.4 — Foundations)
 
 - **Dual-arch kernel** — i386 protected mode & x86_64 long mode  
 - **Processes** — per-process address spaces, preemptive scheduling, wait/kill  
 - **Shell** — pipes, redirection, jobs, Ctrl-C, variables, `cd` / `pwd`  
 - **TigFS** — flat filesystem, path resolution, cwd, safe mount checks  
 - **Layout** — programs under `bin/`; default `PATH=bin:.`  
-- **Green Lizard** — native `.gl` programs on disk (`hello`, `ls`, `cat`, …)  
+- **Green Lizard** — native `.gl` programs on disk (`hello`, `ls`, `cat`, …)
+- **Tools Round 2** — `cp`, `mv`, `touch`, `head`, `clear`, `tee`, `sleep`, `basename`, `dirname`  
 - **C userland** — minimal libc (`open`, `spawn`, `malloc`/`brk`, …)
 
 Shell reference: **[SHELL.md](SHELL.md)** · History: **[CHANGELOG.md](CHANGELOG.md)**

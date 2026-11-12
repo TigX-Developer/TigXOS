@@ -1,0 +1,32 @@
+// mv.gl — rename/move SRC to DST (copy + unlink on flat TigFS)
+fn main() {
+    if argc < 3 {
+        print("usage: mv SRC DST")
+        exit(1)
+    }
+    let in = open(argv[1], O_RDONLY)
+    if in < 0 {
+        print("mv: cannot open", argv[1])
+        exit(1)
+    }
+    let out = open(argv[2], O_WRONLY + O_CREAT + O_TRUNC)
+    if out < 0 {
+        print("mv: cannot create", argv[2])
+        close(in)
+        exit(1)
+    }
+    while 1 {
+        let c = readch(in)
+        if c < 0 {
+            break
+        }
+        writech(out, c)
+    }
+    close(in)
+    close(out)
+    if unlink(argv[1]) != 0 {
+        print("mv: copied but could not remove", argv[1])
+        exit(1)
+    }
+    exit(0)
+}

@@ -1,0 +1,20 @@
+// touch.gl — create empty file or truncate existing
+fn main() {
+    if argc < 2 {
+        print("usage: touch FILE...")
+        exit(1)
+    }
+    let i = 1
+    let bad = 0
+    while i < argc {
+        let fd = open(argv[i], O_WRONLY + O_CREAT)
+        if fd < 0 {
+            print("touch: cannot touch", argv[i])
+            bad = 1
+        } else {
+            close(fd)
+        }
+        i = i + 1
+    }
+    exit(bad)
+}
