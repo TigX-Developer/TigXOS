@@ -7,7 +7,7 @@
 ASM=nasm
 GLC=python3 lizard/glc.py
 VERSION := $(shell sed -n 's/.*TIGX_VERSION "\(.*\)"/\1/p' version.h)
-GL_PROGS = hello echo loop cat rm ls wc writefile lang65 exitn cp mv touch head clear tee sleep basename dirname
+GL_PROGS = hello echo loop cat rm ls wc writefile lang65 exitn cp mv touch head clear tee sleep basename dirname typed
 GL_ELFS  = $(GL_PROGS:%=user/%.gl.elf)
 CC=gcc
 LD=ld

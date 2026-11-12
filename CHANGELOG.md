@@ -1,5 +1,28 @@
 # TigxOS changelog
 
+## 1.1.6 — Shell Scripting 2
+- **`test` / `[`**: string/int comparisons and file probes
+  (`-z`, `-n`, `-f`/`-e`, `=`, `!=`, `-eq`/`-ne`/`-lt`/`-le`/`-gt`/`-ge`)
+- **`if COND ; then BODY ; [else BODY ;] fi`**
+- **`while COND ; do BODY ; done`** (iteration safety cap 10000)
+- **Scripts**: `sh FILE` joins newlines to `;` so multi-line if/while works
+- **glc fix**: emit `__gl_int_to_str` only when `as str` is used (no more unused warnings)
+
+
+## 1.1.5 — Green Lizard 2 (typed language)
+Typed language upgrade for `glc` (still compiles all Round 1/2 tools):
+
+- **Types:** `int`, `str`, `bool`, `void`
+- **Annotations:** `let x: int = 1`, params `fn f(a: int, s: str)`, returns `fn f() -> int`
+- **Casts:** `expr as int` | `as bool` | `as str` (int/bool → str via helper)
+- **Checking:** assign / let / return / call args checked; clear type errors
+- **Comparisons** yield `bool`; `true`/`false` are `bool`
+- **User functions** with signatures (forward decls, arity & type checks)
+- Demo program: `examples/typed.gl` → `bin/typed.elf`
+
+Legacy untyped `let x = 1` and `fn f(x)` still work (default `int`).
+
+
 ## 1.1.4 — Tools – Round 2
 New userland utilities (Green Lizard → `bin/NAME.elf`), installed via PATH:
 

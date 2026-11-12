@@ -91,11 +91,29 @@ fn main() {
 | `O_RDONLY` etc.     | open flags (also O_CREAT, O_TRUNC)   |
 | `break` / `continue`| loop control                         |
 
-## Types
+## Types (Green Lizard 2)
 
-- `int` — C `long`
-- `str` — C `const char *` (string literals and `argv[i]`)
-- Inferred on `let x = ...` when obvious
+| Type | C mapping | Notes |
+|------|-----------|--------|
+| `int` | `long` | Default for unannotated values |
+| `str` | `const char *` | Literals, `argv[i]`, concat |
+| `bool` | `long` (0/1) | `true` / `false`; comparisons yield `bool` |
+| `void` | `void` | Return type only |
+
+```gl
+let n: int = 10
+let ok: bool = true
+let name: str = "Tig"
+
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+let s: str = add(1, 2) as str   // cast int → str
+```
+
+Annotations are optional for compatibility; untyped `let x = 1` defaults to `int`.
+Mismatches are compile errors (`let s: str = 5`).
 
 ## Control flow
 

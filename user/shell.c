@@ -1,4 +1,4 @@
-/* shell.c — interactive shell for TigxOS V1.1.4 */
+/* shell.c — interactive shell for TigxOS V1.1.6 */
 
 #include "libc.h"
 #include "version.h"
@@ -480,6 +480,70 @@ static char *exp_alloc(int n) {
 }
 
 /* Expand $VAR / $? / ${VAR} into dst; returns bytes written (no NUL counted in ret beyond). */
+
+static int shell_atoi(const char *s) {
+    int neg = 0, v = 0;
+    if (!s) return 0;
+    if (*s == '-') { neg = 1; s++; }
+    while (*s >= '0' && *s <= '9') {
+        v = v * 10 + (*s - '0');
+        s++;
+    }
+    return neg ? -v : v;
+}
+
+/* test / [ — Shell Scripting 2 */
+static int cmd_test(int argc, char **argv) {
+    int end = argc;
+    if (!argv[0])
+        return 2;
+    if (argv[0][0] == '[' && argv[0][1] == 0) {
+        if (argc < 2 || strcmp(argv[argc - 1], "]") != 0) {
+            shell_puts("[: missing ]\n");
+            return 2;
+        }
+        end = argc - 1;
+    }
+    int n = end - 1;
+    char **a = argv + 1;
+    if (n <= 0)
+        return 1;
+    if (n == 1)
+        return a[0][0] ? 0 : 1;
+    if (n == 2) {
+        if (strcmp(a[0], "-z") == 0)
+            return a[1][0] ? 1 : 0;
+        if (strcmp(a[0], "-n") == 0)
+            return a[1][0] ? 0 : 1;
+        if (strcmp(a[0], "-f") == 0 || strcmp(a[0], "-e") == 0) {
+            /* use open as existence probe */
+            int fd = open(a[1], O_RDONLY);
+            if (fd >= 0) { close(fd); return 0; }
+            return 1;
+        }
+        shell_puts("test: unknown unary operator\n");
+        return 2;
+    }
+    if (n == 3) {
+        if (strcmp(a[1], "=") == 0)
+            return strcmp(a[0], a[2]) == 0 ? 0 : 1;
+        if (strcmp(a[1], "!=") == 0)
+            return strcmp(a[0], a[2]) != 0 ? 0 : 1;
+        int l = shell_atoi(a[0]);
+        int r = shell_atoi(a[2]);
+        if (strcmp(a[1], "-eq") == 0) return l == r ? 0 : 1;
+        if (strcmp(a[1], "-ne") == 0) return l != r ? 0 : 1;
+        if (strcmp(a[1], "-lt") == 0) return l < r ? 0 : 1;
+        if (strcmp(a[1], "-le") == 0) return l <= r ? 0 : 1;
+        if (strcmp(a[1], "-gt") == 0) return l > r ? 0 : 1;
+        if (strcmp(a[1], "-ge") == 0) return l >= r ? 0 : 1;
+        shell_puts("test: unknown binary operator\n");
+        return 2;
+    }
+    shell_puts("test: too many arguments\n");
+    return 2;
+}
+
 static int expand_into(char *dst, int dstmax, const char *src, int allow_vars) {
     int o = 0;
     while (*src && o + 1 < dstmax) {
@@ -669,7 +733,10 @@ static void cmd_help(void) {
     shell_puts("Redir:     cmd > file   cmd >> file   cmd < file\n");
     shell_puts("Pipe:      cmd1 | cmd2   (concurrent, real pipes)\n");
     shell_puts("Edit:      arrows  Home/End  Del  Bksp  Up/Down history\n");
-    shell_puts("Scripts:   # comment   sh script.file\n");
+    shell_puts("Scripts:   # comment   sh FILE\n");
+    shell_puts("Flow:      if C ; then B ; [else B ;] fi\n");
+    shell_puts("           while C ; do B ; done\n");
+    shell_puts("Test:      test EXPR   [ EXPR ]   ($? / && / ||)\n");
     shell_puts("Programs:  hello echo loop args cat rm ls wc writefile\n");
     shell_puts("           lang65 exitn cp mv touch head clear tee sleep\n");
     shell_puts("           basename dirname\n");
@@ -735,7 +802,7 @@ static int try_spawn_one(const char *name, char **argv, char **envp) {
 }
 
 /*
- * PATH search (v1.1.4): if name contains no '/', walk PATH components.
+ * PATH search (v1.1.6): if name contains no '/', walk PATH components.
  * Default PATH is "bin:." (set at shell start if unset).
  * Each component is joined with '/' + name (and name.elf).
  */
@@ -749,7 +816,7 @@ static int try_spawn(const char *name, char **argv) {
         return try_spawn_one(name, argv, envp);
 
     /*
-     * PATH search only (v1.1.4 fix): do NOT try cwd first unless "." is in PATH.
+     * PATH search only (v1.1.6 fix): do NOT try cwd first unless "." is in PATH.
      * Components are tried in order. Over-long components are skipped (consumed).
      */
     /* NULL = unset → default; empty string = explicitly empty (no search). */
@@ -1299,10 +1366,12 @@ static int try_builtin(char **argv, int argc, char *out_path, int append,
     int is_fg = (strcmp(cmd, "fg") == 0);
     int is_cd = (strcmp(cmd, "cd") == 0);
     int is_pwd = (strcmp(cmd, "pwd") == 0);
+    int is_test = (strcmp(cmd, "test") == 0 ||
+                   (cmd[0] == '[' && cmd[1] == 0));
 
     if (!is_help && !is_pid && !is_true && !is_false &&
         !is_set && !is_export && !is_env && !is_unset && !is_jobs && !is_kill &&
-        !is_wait && !is_fg && !is_cd && !is_pwd)
+        !is_wait && !is_fg && !is_cd && !is_pwd && !is_test)
         return 0;
 
     int saved_out = -1, saved_in = -1;
@@ -1324,6 +1393,8 @@ static int try_builtin(char **argv, int argc, char *out_path, int append,
         *status = 0;
     } else if (is_false) {
         *status = 1;
+    } else if (is_test) {
+        *status = cmd_test(argc, argv);
     } else if (is_set) {
         *status = cmd_set(argc, argv);
     } else if (is_export) {
@@ -1424,10 +1495,144 @@ static int is_list_op(const char *s) {
 
 int cmd_sh_file(const char *path);
 
+
+/* ---- Shell Scripting 2: if / while ---- */
+
+static int run_list(char **argv, int argc); /* fwd */
+
+static int run_if(char **argv, int argc) {
+    /* if COND ; then BODY [; else BODY] ; fi   (semicolons optional as tokens) */
+    if (argc < 4) {
+        shell_puts("if: syntax error\n");
+        return 2;
+    }
+    int then_i = -1, else_i = -1, fi_i = -1;
+    int depth = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "if") == 0)
+            depth++;
+        else if (strcmp(argv[i], "fi") == 0) {
+            if (depth == 0) {
+                fi_i = i;
+                break;
+            }
+            depth--;
+        } else if (depth == 0 && strcmp(argv[i], "then") == 0 && then_i < 0)
+            then_i = i;
+        else if (depth == 0 && strcmp(argv[i], "else") == 0 && else_i < 0)
+            else_i = i;
+    }
+    if (then_i < 0 || fi_i < 0) {
+        shell_puts("if: missing then/fi\n");
+        return 2;
+    }
+    /* condition: argv[1 .. then_i) */
+    int st = 0;
+    if (then_i > 1) {
+        char *save = argv[then_i];
+        argv[then_i] = 0;
+        st = run_list(&argv[1], then_i - 1);
+        argv[then_i] = save;
+        last_status = st;
+    }
+    if (st == 0) {
+        /* then body: then_i+1 .. else_i or fi_i */
+        int end = (else_i > 0) ? else_i : fi_i;
+        if (end > then_i + 1) {
+            char *save = argv[end];
+            argv[end] = 0;
+            st = run_list(&argv[then_i + 1], end - then_i - 1);
+            argv[end] = save;
+            last_status = st;
+        } else
+            st = 0;
+    } else if (else_i > 0) {
+        if (fi_i > else_i + 1) {
+            char *save = argv[fi_i];
+            argv[fi_i] = 0;
+            st = run_list(&argv[else_i + 1], fi_i - else_i - 1);
+            argv[fi_i] = save;
+            last_status = st;
+        } else
+            st = 0;
+    }
+    return last_status;
+}
+
+static int run_while(char **argv, int argc) {
+    /* while COND ; do BODY ; done */
+    if (argc < 5) {
+        shell_puts("while: syntax error\n");
+        return 2;
+    }
+    int do_i = -1, done_i = -1;
+    int depth = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "while") == 0)
+            depth++;
+        else if (strcmp(argv[i], "done") == 0) {
+            if (depth == 0) {
+                done_i = i;
+                break;
+            }
+            depth--;
+        } else if (depth == 0 && strcmp(argv[i], "do") == 0 && do_i < 0)
+            do_i = i;
+    }
+    if (do_i < 0 || done_i < 0) {
+        shell_puts("while: missing do/done\n");
+        return 2;
+    }
+    int guard = 0;
+    int st = 0;
+    while (guard++ < 10000) { /* safety cap */
+        if (do_i > 1) {
+            char *save = argv[do_i];
+            argv[do_i] = 0;
+            st = run_list(&argv[1], do_i - 1);
+            argv[do_i] = save;
+            last_status = st;
+        } else
+            st = 0;
+        if (st != 0)
+            break;
+        if (done_i > do_i + 1) {
+            char *save = argv[done_i];
+            argv[done_i] = 0;
+            st = run_list(&argv[do_i + 1], done_i - do_i - 1);
+            argv[done_i] = save;
+            last_status = st;
+        }
+    }
+    if (guard >= 10000) {
+        shell_puts("while: iteration limit\n");
+        return 1;
+    }
+    return last_status;
+}
+
 /* Run one pipeline or simple command (no list ops). background=1 → no wait. */
 static int run_one(char **argv, int argc, int background) {
     if (argc <= 0)
         return 0;
+
+    /* Control structures (not backgrounded) */
+    if (strcmp(argv[0], "if") == 0) {
+        if (background) {
+            shell_puts("if: cannot background
+");
+            return 1;
+        }
+        return run_if(argv, argc);
+    }
+    if (strcmp(argv[0], "while") == 0) {
+        if (background) {
+            shell_puts("while: cannot background
+");
+            return 1;
+        }
+        return run_while(argv, argc);
+    }
 
     int has_pipe = 0;
     for (int i = 0; i < argc; i++) {
@@ -1565,40 +1770,33 @@ int cmd_sh_file(const char *path) {
         shell_puts("\n");
         return 1;
     }
-    char line[LINE_MAX];
+    /*
+     * Read whole script (cap 4K). Newlines become ';' so multi-line
+     * if/while forms work:  if true\nthen\necho y\nfi
+     */
+    #define SH_FILE_MAX 4096
+    static char buf[SH_FILE_MAX];
     int n = 0;
-    int st = 0;
     for (;;) {
         char c;
         long r = read(fd, &c, 1);
         if (r <= 0)
             break;
-        if (c == '\n' || c == '\r') {
-            line[n] = 0;
-            if (n > 0)
-                st = execute_line(line);
-            n = 0;
-            continue;
+        if (n + 1 >= SH_FILE_MAX) {
+            shell_puts("sh: script too long\n");
+            close(fd);
+            return 1;
         }
-        if (n + 1 < LINE_MAX)
-            line[n++] = c;
-        else {
-            shell_puts("sh: line too long (truncated)\n");
-            /* drain until newline */
-            while (r > 0 && c != '\n' && c != '\r') {
-                r = read(fd, &c, 1);
-            }
-            n = 0;
-            last_status = 1;
-            continue;
-        }
-    }
-    if (n > 0) {
-        line[n] = 0;
-        st = execute_line(line);
+        if (c == '\n' || c == '\r')
+            buf[n++] = ';';
+        else
+            buf[n++] = c;
     }
     close(fd);
-    return st;
+    buf[n] = 0;
+    if (n == 0)
+        return 0;
+    return execute_line(buf);
 }
 
 static int execute_line(char *line) {
@@ -1627,7 +1825,7 @@ int main(int argc, char **argv) {
     (void)argv;
     char line[LINE_MAX];
 
-    /* Standard layout (v1.1.4): programs live under bin/ ; PATH defaults to bin:. */
+    /* Standard layout (v1.1.6): programs live under bin/ ; PATH defaults to bin:. */
     if (!var_get("PATH"))
         var_set("PATH", "bin:.", 1);
 

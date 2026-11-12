@@ -1,6 +1,10 @@
-// clear.gl — clear the console (ANSI + form-feed fallback)
+// clear.gl — clear the VGA text console by scrolling
 fn main() {
-    // ANSI clear screen + home (works on many serial/QEMU setups)
-    write(STDOUT, "\x1b[2J\x1b[H")
+    // 25-line text mode: push old content off-screen
+    let i = 0
+    while i < 30 {
+        write(STDOUT, "\n")
+        i = i + 1
+    }
     exit(0)
 }
