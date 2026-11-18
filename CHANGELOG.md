@@ -1,5 +1,170 @@
 # TigxOS changelog
 
+## 1.2.1-tests — Expanded make test suites
+
+- **17 suites / ~177 checks** via `make test` (both arches)
+- New suites: string, vfs (hierarchical reads), pipe, irq/spinlock, rtc, gdt, aspace
+- Expanded: syscall ABI through SYS_MKDIR, path resolve, process kill edge cases
+- KERNEL_SECTS 288→320 for larger test kernels
+## 1.2.1 — VFS layer + TigFS v6 directories
+
+Hierarchical filesystem and a thin VFS so one `open()` path serves TigFS
+(and later ramfs / FAT32).
+
+### TigFS v6 hierarchical
+- **Root directory** is always inode 0
+- **Directory data** holds packed 32-byte dentries `{name[28], ino, type}`
+- **Path walk** resolves `/bin/shell.elf` through parent directories
+- **`fs_mkdir` / `SYS_MKDIR` (24)** create directories
+- **`chdir`** only succeeds on real directories
+- **`getdents`** lists the current working directory (not only root)
+- Flat images are **migrated on mount** (names like `bin/foo` become dirs)
+
+### VFS
+- `vfs.h` / `vfs.c`: unified open / create / unlink / mkdir / stat / read / write / getdents
+- TigFS mounted at `/`; `/tmp` reserved for ramfs (stub)
+- Open files store **inode number + fsid** (not just a flat name)
+
+### Tools
+- `tools/mktigfs.py` builds hierarchical images (root + intermediate dirs)
+
+### ABI
+- New syscall: **SYS_MKDIR = 24**
+- Existing numbers 0–23 unchanged
+
+## 1.2.0 — Kernel infrastructure audit
+
+Audit pass over GDT/IDT, memory, address spaces, and the scheduler. Known
+latent bugs fixed; dual-arch still the gate.
+
+### Interrupt / IDT
+- **x86_64 stubs**: stack alignment for the C handler no longer uses the fragile
+  double-`pop rsp` pattern; save real frame in RDI, build an aligned scratch
+  stack, restore with a single `pop rsp`.
+- **i386 stubs**: ESP is 16-byte aligned before the C call (SysV hygiene).
+
+### Address spaces / VMM
+- **i386** (from 1.1.12-update3): splitting a 4 MB PSE page into a PT replicates
+  the identity mappings instead of leaving an empty table.
+- **x86_64 `aspace_map`**: same for 2 MB pages — split fills the new PT with the
+  existing 4 KB identity entries.
+- **`vmm_map_page` (x86_64)**: can split a covering 2 MB page and then install the
+  requested 4 KB mapping (was a hard error).
+
+### Memory
+- **Heap**: identity-map contract documented; fail closed if the first 1 MB of
+  frames lands outside the identity window (never leave a half-init heap).
+- **sysinfo / free** (from 1.1.12-update3): totals capped to the PMM window so
+  reported free never exceeds total.
+
+### Scheduler
+- Documented `schedule()` IF=0 contract; idle remains the always-runnable
+  fallback and is never blocked.
+- TSS `rsp0`/`esp0` still updated on every context switch (audited, unchanged).
+
+### GDT / TSS
+- Layout and selectors audited (kernel CS 0x08, DS 0x10, user DS 0x18, user CS
+  0x20, TSS 0x28). No structural change.
+
+### Version / docs
+- `version.h` → **1.2.0**
+- Roadmap series: **1.2.x Kernel infrastructure** begins here.
+
+No intentional syscall ABI or TigFS layout breaks.
+
+## 1.1.12-update3 — Bugfix pass (Foundations hardening)
+
+Real bugs fixed (no ABI / layout change):
+
+- **Shell scripts**: strip `#` comments **per line** before joining with `;`, so a comment no longer truncates the rest of the file
+- **filetable**: `of_alloc` / `of_incref` / `of_decref` / `of_mark_unlink` use `irq_save` / `irq_restore` (safe inside the scheduler)
+- **pipe**: `wait_queue_wake_all` runs inside the interrupt-off window (read/write/decref) to avoid wait-list races
+- **edit find**: status line keeps the `find:` prompt (and typed text) while you type; `draw()` no longer blanks it
+- **RTC**: always mask the 12-hour PM bit; correct 12→24 hour conversion in both BCD and binary modes
+- **Shell EOF**: `readline` returning 0 (EOF) exits the shell instead of spinning forever
+- **aspace i386**: splitting a 4 MB PSE page into a page table now replicates the identity mappings (no silent loss)
+- **sysinfo / free**: report `mem_total` capped to the PMM window so total and free stay consistent
+- **glc**: non-ASCII string literals no longer go through `unicode_escape`; dead `BUILTINS` set removed
+- **Docs / cleanup**: full syscall table (0–23) in `arch/README.md`; duplicate root `mktigfs.py` removed; `seed_shell_from_embed` rename; version banners → 1.1.12 throughout
+
+Latent notes kept for 1.2.0 audit (interrupt stack alignment, 2 MB page split, heap identity check) — not regressions.
+
+## 1.1.12-update2 — Hardening + test coverage
+- **glc arrays**: runtime bounds checks on load/store → `index out of range` + exit(1)
+- **SYS_KILL**: signal 0 = existence probe only; unknown signals return `-1` (no longer map to SIGKILL)
+- **SYS_HALT**: restricted to `shell` / `shell.elf`; isa-debug-exit code 2 (status 5) so halt ≠ test PASS
+- **SYS_PSINFO**: uses `copy_to_user` instead of raw user pointer writes
+- **Tab completion**: match cap raised 32 → 96
+- **Tests**: process_kill / process_snapshot checks; SYS_KILL/PSINFO/HALT number checks
+
+
+## 1.1.12 — Foundations final (freeze)
+- **glc**: reject C reserved words as fn/var names (`double`, `long`, …); `importdemo` uses `twice` not `double`
+- **Freeze** of the Foundations track (1.1.6 → 1.1.12)
+- **Release gate**: `make test` runs full headless suites on **i386 and x86_64** (84 checks)
+- **Docs**: `FOUNDATIONS.md` (scope, limits, gate); README feature list brought up to date
+- Brand / version strings → 1.1.12
+- No intentional ABI or TigFS layout breaks from this tag forward without a major bump
+
+
+## 1.1.11 — Foundations RC2 (Green Lizard stdlib)
+- **Arrays**: `let a: int[N]` / `let a: int[N] = [1,2,…]`; index load/store `a[i]`, `a[i] = v`
+- **import**: `import "file.gl"` (relative include, cycle-safe)
+- **Strings**: `len(s)`, `substr(s, start, len)` (plus existing concat `+` and `s[i]`)
+- **Errors**: clearer parse messages with line + hint
+- **Examples**: `arrdemo.gl`, `strlib.gl`, `importdemo.gl` + `libmath.gl`
+- glc version banner → 1.1.11
+
+
+## 1.1.10 — Foundations RC1 (shell comfort)
+- **History**: ring expanded to 32; `history` builtin lists entries; Up/Down still navigate
+- **Tab completion**: completes builtins, aliases, and TigFS / `bin/*.elf` names (common-prefix + list)
+- **Aliases**: `alias`, `alias name=value`, `alias name value…`, `unalias name`; one-level expansion on argv[0]
+- **Startup rc**: auto-runs first of `shell.rc`, `/shell.rc`, `bin/shell.rc` if present
+- Help text updated for Tab / alias / history / rc
+
+
+## 1.1.9 — Process management
+- **SYS_PSINFO** (22): snapshot of live/zombie processes for userland
+- **Userland tools** on `PATH` (`bin/`):
+  - `ps` — PID / PPID / STATE / USER / NAME table
+  - `kill [-sig] PID` — default SIGKILL (9); also shell builtin
+  - `top [N]` — refresh process table N times (default 3, 1 s interval)
+- **Job control polish**: shell `kill` accepts `-sig`; help lists ps/top/kill
+- **Existing**: `jobs`, `fg`, `wait`, Ctrl-C → SIGINT foreground (kernel `process_fg_*`)
+- Kernel: `process_snapshot()` backs SYS_PSINFO
+- **Halt**: `halt` / `shutdown` / `poweroff` builtins + **SYS_HALT** (23); stops shell respawn and halts (QEMU power-off when available)
+- `exit`/`quit` still only leave the shell (kernel respawns it on purpose)
+
+
+## 1.1.8-update2 — Stability, size, headless, cleanup
+- **Headless / tests**: console output is mirrored to COM1 serial so `-serial stdio` and `make test` show boot messages and suite results; isa-debug-exit path works.
+- **i386 size**: userland built with `-Os -fno-asynchronous-unwind-tables -fno-exceptions` so `shell.elf` fits TigFS direct-block limit (≤ 56 KiB). Both arches build and link cleanly.
+- **Stale comments removed**: audit notes, V1.0.58 strings, and leftover version spam cleaned from makefile, tests.c, CHANGELOG.
+- **Tests**: brand demo uses current version; process suite no longer races (linger worker for lookup-by-pid); FS free-block headroom in mktigfs; suites remain the release gate for both arches.
+- **mktigfs**: reserve free data blocks so runtime `fs_write` / create work on a pre-populated image.
+- No version number bump (still 1.1.8 in `version.h`).
+
+## 1.1.8 — Time and system information
+- **RTC**: CMOS real-time clock driver (`rtc.c`) — year/month/day/hour/min/sec
+- **SYS_SYSINFO** (21): uptime, ticks/Hz, memory KB, TigFS block/file counts, RTC, arch, version
+- Userland tools on `PATH` (`bin/`):
+  - `date` — RTC wall clock
+  - `uptime` — time since boot
+  - `uname` / `uname -a` — OS name, version, arch
+  - `free` — memory total/used/free
+  - `df` — TigFS blocks used/free + file count
+  - `sysinfo` — compact neofetch-style summary
+
+
+## 1.1.7 — Console text editor
+- New userland program **`edit`** (`bin/edit.elf`): open, edit, save, quit, search
+- Line numbers + status bar (path, dirty `*`, line:col, messages)
+- Cursor keys, Home/End, Backspace/Delete, Enter (split line)
+- **Ctrl-S** save, **Ctrl-F** find, **Ctrl-Q** / **Ctrl-X** quit (double-confirm if dirty)
+- Usage: `edit FILE` or `edit` (empty buffer; save needs a path from `edit name`)
+
+
 ## 1.1.6 — Shell Scripting 2
 - **`test` / `[`**: string/int comparisons and file probes
   (`-z`, `-n`, `-f`/`-e`, `=`, `!=`, `-eq`/`-ne`/`-lt`/`-le`/`-gt`/`-ge`)
@@ -433,3 +598,11 @@ Post-1.1 work (not in this tag): TigFS dirs/paths, richer signals, VTs, networki
 
 ## 1.0.58
 - version.h single source; green lizard rename; makefile cleanup; dead kernel menu removed.
+
+## 1.2.1-ramfs — Working RAM disk at /tmp
+
+- **ramfs**: 32 inodes, 64 KB pool, max 4 KB/file under `/tmp`
+- VFS routes `/tmp/*` to ramfs (open/create/mkdir/unlink/stat/getdents/read/write)
+- `chdir /tmp` works; hierarchy under `/tmp` supported
+- New `ramfs` test suite in `make test`
+

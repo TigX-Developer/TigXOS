@@ -1,0 +1,8 @@
+// strlib.gl — len / substr (1.1.11)
+fn main() {
+    let s: str = "TigxOS"
+    print("len", len(s))
+    let part: str = substr(s, 0, 3)
+    print("substr", part)
+    exit(0)
+}

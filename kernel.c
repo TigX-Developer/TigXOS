@@ -1,16 +1,21 @@
-// kernel.c - TigxOS V1.0.58
+// kernel.c - TigxOS 1.1.12
 // Expanded test framework + semantic color palette
+
+
+
 #include "version.h"
 #include "interrupt.h"
 #include "console.h"
 #include "keyboard.h"
 #include "timer.h"
+#include "rtc.h"
 #include "memory.h"
 #include "aspace.h"
 #include "process.h"
 #include "filetable.h"
 #include "disk.h"
 #include "fs.h"
+#include "vfs.h"
 #include "wait.h"
 #include "sync.h"
 #include "font.h"
@@ -40,9 +45,17 @@ static const struct test_entry test_table[] = {
     { '4', "process",    test_suite_process    },
     { '5', "memory",     test_suite_memory     },
     { '6', "fs",         test_suite_fs         },
+    { 'v', "vfs",        test_suite_vfs        },
     { '7', "elf",        test_suite_elf        },
     { '8', "syscall",    test_suite_syscall    },
     { '9', "console",    test_suite_console    },
+    { 's', "string",     test_suite_string     },
+    { 'p', "pipe",       test_suite_pipe       },
+    { 'i', "irq",        test_suite_irq        },
+    { 'r', "rtc",        test_suite_rtc        },
+    { 'g', "gdt",        test_suite_gdt        },
+    { 'a', "aspace",     test_suite_aspace     },
+    { 'm', "ramfs",      test_suite_ramfs      },
     { '0', "regression", test_suite_regression },
 };
 #define TEST_TABLE_N (sizeof(test_table)/sizeof(test_table[0]))
@@ -106,7 +119,7 @@ static void print_banner(void) {
  * tools/mktigfs.py. At boot we only ensure shell.elf exists so a
  * freshly-formatted FS (or a corrupted one) can still reach a prompt.
  */
-static void seed_shell_if_missing(void) {
+static void seed_shell_from_embed(void) {
     if (!fs_ready()) {
         kprintf("seed: FS not ready\n");
         return;
@@ -133,6 +146,7 @@ static void seed_shell_if_missing(void) {
 
 
 /* ---------- kmain ---------- */
+
 void kmain(void) {
     serial_init();
 
@@ -155,18 +169,20 @@ void kmain(void) {
     syscall_init();
     kprintf_color(TIG_HEADER, "Timer...\n");
     timer_init(100);
+    rtc_init();
     kprintf_color(TIG_HEADER, "Keyboard...\n");
     keyboard_init();
     kprintf_color(TIG_HEADER, "Disk...\n");
     disk_init();
     kprintf_color(TIG_HEADER, "FS...\n");
     fs_init();
+    vfs_init();
     kprintf_color(TIG_WARN, "\nProcesses (preemptive, blocking)...\n");
     /* filetable BEFORE process_init — idle's stdio allocates console_of */
     filetable_init();
     pipe_init();
     process_init();
-    seed_shell_if_missing();
+    seed_shell_from_embed();
 
 
     /* Userland shell owns the keyboard. Do NOT start kernel shell_task —

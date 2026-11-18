@@ -1,4 +1,6 @@
-// wait.h - Blocking wait queues for TigxOS V1.0.58
+
+
+// wait.h - Blocking wait queues for TigxOS 1.1.12
 #ifndef WAIT_H
 #define WAIT_H
 

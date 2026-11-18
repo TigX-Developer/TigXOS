@@ -1,4 +1,7 @@
-; arch/x86_64/interrupt.asm - ISR + IRQ stubs with stack alignment
+; arch/x86_64/interrupt.asm — ISR + IRQ stubs (TigxOS 1.2.0)
+; Stack alignment: SysV requires RSP % 16 == 0 immediately before CALL.
+; CPL0 vs CPL3 frames differ by 16 bytes, so we save the real frame pointer
+; and force-align a scratch RSP for the C call, then restore.
 [bits 64]
 [default rel]
 
@@ -14,31 +17,29 @@ load_idt:
     lidt [rdi]
     ret
 
-; ---------- Exception macros ----------
 %macro ISR_NOERR 1
 isr_%1:
-    push 0          ; dummy error code
-    push %1         ; interrupt number
+    push 0
+    push %1
     jmp isr_common_stub
 %endmacro
 
 %macro ISR_ERR 1
 isr_%1:
-    ; CPU already pushed error code
     push %1
     jmp isr_common_stub
 %endmacro
 
-; ---------- IRQ macros (no error code) ----------
 %macro IRQ 2
 irq_%1:
-    push 0          ; dummy error code
-    push %2         ; vector number (32 + irq)
+    push 0
+    push %2
     jmp irq_common_stub
 %endmacro
 
+; Common path: save GPRs, align for C ABI, call, restore, iretq.
+; Frame layout matches struct interrupt_frame in interrupt.h.
 isr_common_stub:
-    ; Save all GPRs
     push rax
     push rbx
     push rcx
@@ -55,18 +56,16 @@ isr_common_stub:
     push r14
     push r15
 
-    mov rdi, rsp            ; pass frame pointer (struct interrupt_frame *)
+    mov rdi, rsp                ; arg0 = interrupt_frame *
 
-    ; SysV ABI: RSP % 16 == 0 immediately before CALL.
-    ; CPL0 vs CPL3 frames differ by 16 bytes (SS/RSP), so a fixed sub is wrong.
-    ; Save original RSP, force-align, call, then restore.
+    ; Align stack for the CALL without using the fragile "pop rsp" pattern:
+    ; keep the true frame in RDI; build an aligned scratch stack in RAX/RSP.
     mov rax, rsp
-    and rsp, -16
-    push rax                ; keep original rsp at [rsp] (also re-misaligns by 8)
-    push rax                ; pad to 16-byte alignment for the CALL
+    and rsp, -16                ; 16-byte aligned
+    sub rsp, 8                  ; room so CALL's return-addr push lands aligned
+    push rax                    ; [aligned_rsp] = original RSP (for restore)
     call isr_handler
-    pop rax                 ; discard pad
-    pop rsp                 ; restore pre-align rsp
+    pop rsp                     ; restore original (pre-align) RSP
 
     pop r15
     pop r14
@@ -84,7 +83,7 @@ isr_common_stub:
     pop rbx
     pop rax
 
-    add rsp, 16             ; remove int_num + error_code
+    add rsp, 16                 ; int_num + error_code
     iretq
 
 irq_common_stub:
@@ -108,10 +107,9 @@ irq_common_stub:
 
     mov rax, rsp
     and rsp, -16
-    push rax
+    sub rsp, 8
     push rax
     call irq_handler
-    pop rax
     pop rsp
 
     pop r15
@@ -133,7 +131,6 @@ irq_common_stub:
     add rsp, 16
     iretq
 
-; === Exception stubs 0-31 ===
 ISR_NOERR 0
 ISR_NOERR 1
 ISR_NOERR 2
@@ -167,7 +164,6 @@ ISR_NOERR 29
 ISR_ERR   30
 ISR_NOERR 31
 
-; === IRQ stubs 0-15 → vectors 32-47 ===
 IRQ 0,  32
 IRQ 1,  33
 IRQ 2,  34
@@ -185,12 +181,10 @@ IRQ 13, 45
 IRQ 14, 46
 IRQ 15, 47
 
-
-; === Syscall stub (int 0x80 from ring 3) → isr_common_stub ===
-; CPU already pushed SS,RSP,RFLAGS,CS,RIP (privilege change).
+; int 0x80 from ring 3 — CPU already pushed SS/RSP/RFLAGS/CS/RIP
 syscall_stub:
-    push 0              ; dummy error code
-    push 0x80           ; vector
+    push 0
+    push 0x80
     jmp isr_common_stub
 
 section .data

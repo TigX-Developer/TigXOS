@@ -1,9 +1,11 @@
-/* pipe.c — ring-buffer pipes, blocking R/W via wait queues */
+/* pipe.c — ring-buffer pipes, blocking R/W via wait queues (TigxOS 1.1.12) */
+
 #include "pipe.h"
 #include "wait.h"
 #include "console.h"
 #include "string.h"
 #include "process.h"
+#include "spinlock.h"
 #include <stddef.h>
 
 struct pipe {
@@ -32,7 +34,7 @@ void pipe_init(void) {
 }
 
 int pipe_alloc(void) {
-    __asm__ volatile("cli");
+    unsigned long flags = irq_save();
     int id = -1;
     for (int i = 0; i < MAX_PIPES; i++) {
         if (!pipes[i].used) {
@@ -44,29 +46,29 @@ int pipe_alloc(void) {
             break;
         }
     }
-    __asm__ volatile("sti");
+    irq_restore(flags);
     return id;
 }
 
 void pipe_incref(int pipe_id, int is_write) {
     if (pipe_id < 0 || pipe_id >= MAX_PIPES)
         return;
-    __asm__ volatile("cli");
+    unsigned long flags = irq_save();
     if (pipes[pipe_id].used) {
         if (is_write)
             pipes[pipe_id].writers++;
         else
             pipes[pipe_id].readers++;
     }
-    __asm__ volatile("sti");
+    irq_restore(flags);
 }
 
 void pipe_decref(int pipe_id, int is_write) {
     if (pipe_id < 0 || pipe_id >= MAX_PIPES)
         return;
-    __asm__ volatile("cli");
+    unsigned long flags = irq_save();
     if (!pipes[pipe_id].used) {
-        __asm__ volatile("sti");
+        irq_restore(flags);
         return;
     }
     struct pipe *p = &pipes[pipe_id];
@@ -85,7 +87,7 @@ void pipe_decref(int pipe_id, int is_write) {
         p->used = 0;
         p->head = p->tail = p->count = 0;
     }
-    __asm__ volatile("sti");
+    irq_restore(flags);
 }
 
 long pipe_read(int pipe_id, char *dst, size_t len) {
@@ -96,29 +98,29 @@ long pipe_read(int pipe_id, char *dst, size_t len) {
     struct pipe *p = &pipes[pipe_id];
 
     for (;;) {
-        __asm__ volatile("cli");
-        if (p->count > 0)
-            break;
+        unsigned long flags = irq_save();
+        if (p->count > 0) {
+            size_t n = len;
+            if (n > (size_t)p->count)
+                n = (size_t)p->count;
+            for (size_t i = 0; i < n; i++) {
+                dst[i] = p->buf[p->head];
+                p->head = (p->head + 1) % PIPE_BUFSZ;
+                p->count--;
+            }
+            /* Wake writers while still IF=0 to avoid wait-list races */
+            wait_queue_wake_all(&p->wq);
+            irq_restore(flags);
+            return (long)n;
+        }
         if (p->writers == 0) {
-            __asm__ volatile("sti");
+            irq_restore(flags);
             return 0; /* EOF */
         }
         wait_queue_block(&p->rq, 0);
-        /* sti done by wait path return with IF=0; restore */
-        __asm__ volatile("sti");
+        /* returns with IF still 0 */
+        irq_restore(flags);
     }
-    /* IRQs still off */
-    size_t n = len;
-    if (n > (size_t)p->count)
-        n = (size_t)p->count;
-    for (size_t i = 0; i < n; i++) {
-        dst[i] = p->buf[p->head];
-        p->head = (p->head + 1) % PIPE_BUFSZ;
-        p->count--;
-    }
-    __asm__ volatile("sti");
-    wait_queue_wake_all(&p->wq); /* space available */
-    return (long)n;
 }
 
 long pipe_write(int pipe_id, const char *src, size_t len) {
@@ -130,20 +132,20 @@ long pipe_write(int pipe_id, const char *src, size_t len) {
     size_t written = 0;
 
     while (written < len) {
-        __asm__ volatile("cli");
+        unsigned long flags = irq_save();
         if (p->readers == 0) {
-            __asm__ volatile("sti");
+            irq_restore(flags);
             return written > 0 ? (long)written : -1;
         }
         while (p->count >= PIPE_BUFSZ) {
             if (p->readers == 0) {
-                __asm__ volatile("sti");
+                irq_restore(flags);
                 return written > 0 ? (long)written : -1;
             }
             wait_queue_block(&p->wq, 0);
             /* still IF=0 */
             if (p->readers == 0) {
-                __asm__ volatile("sti");
+                irq_restore(flags);
                 return written > 0 ? (long)written : -1;
             }
         }
@@ -157,10 +159,8 @@ long pipe_write(int pipe_id, const char *src, size_t len) {
             p->count++;
         }
         written += n;
-        __asm__ volatile("sti");
-        wait_queue_wake_all(&p->rq);
+        wait_queue_wake_all(&p->rq); /* data available — still IF=0 */
+        irq_restore(flags);
     }
     return (long)written;
 }
-
-

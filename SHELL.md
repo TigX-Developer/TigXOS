@@ -1,4 +1,4 @@
-# TigxOS shell (v1.1.6)
+# TigxOS shell (1.1.12)
 
 Interactive shell for TigxOS. Programs live on TigFS; the kernel embeds only `shell.elf`.
 
@@ -29,7 +29,7 @@ Interactive shell for TigxOS. Programs live on TigFS; the kernel embeds only `sh
 - **Jobs**: `cmd &` — background; Ctrl-C sends SIGINT to the foreground job only
 - **Lists**: `;`, `&&`, `\|\|`, `#` comments
 
-## Paths, cwd and PATH (v1.1.2 / v1.1.6)
+## Paths, cwd and PATH (1.1.12 / 1.1.12)
 
 - Each process has a cwd (absolute path string). Shell starts at `/`.
 - Relative paths are resolved against cwd; absolute paths start with `/`.
@@ -59,7 +59,7 @@ Children receive exported variables via `envp` (`getenv` / `environ` in libc).
 
 Exit status for signals is `128 + sig` (e.g. 130 for SIGINT).
 
-## Limits (v1.1.6)
+## Limits (1.1.12)
 
 - Line length: 256
 - Args per command: 32
@@ -80,7 +80,7 @@ make run-32        # i386
 ```
 
 
-## Shell Scripting 2 (1.1.6)
+## Shell Scripting 2 (1.1.6+)
 
 ```
 test -z "" ; echo $?

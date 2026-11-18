@@ -1,4 +1,8 @@
 /* ISO.F16 — 8x16 VGA font (256 glyphs x 16 rows), from ISO.F16 */
+
+
+/* This is a 3rd party font */
+
 #include <stdint.h>
 #include "font.h"
 

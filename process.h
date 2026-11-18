@@ -1,3 +1,5 @@
+
+
 #ifndef PROCESS_H
 #define PROCESS_H
 #include <stdint.h>
@@ -68,6 +70,10 @@ int  process_fg_add(int pid);
 void process_fg_interrupt(void); /* kill all fg with SIGINT status */
 void process_fg_remove(int pid);
 
+/* Stop shell auto-respawn; pair with arch halt / hlt loop. */
+void process_request_halt(void);
+int  process_halt_requested(void);
+
 void process_yield(void);
 void schedule(void);
 void scheduler_tick(void);
@@ -76,6 +82,8 @@ struct process *process_current(void);
 struct process *process_lookup_pid(int pid);
 int  process_count(void);
 void process_list(void);
+/* Fill user-facing process table; returns number of entries. */
+int  process_snapshot(void *out_procs, int max);
 void process_wake_timed(void);
 void process_block_current(uint32_t wake_tick);
 int  scheduler_is_enabled(void);

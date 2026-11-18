@@ -1,3 +1,5 @@
+
+
 #include "string.h"
 
 void* memset(void* dest, int c, size_t n) {
@@ -82,4 +84,12 @@ int strncmp(const char* s1, const char* s2, size_t n) {
     if (!n)
         return 0;
     return *(const unsigned char*)s1 - *(const unsigned char*)s2;
+}
+
+char *strncat(char *dest, const char *src, size_t n) {
+    char *d = dest;
+    while (*d) d++;
+    while (n-- && *src) *d++ = *src++;
+    *d = 0;
+    return dest;
 }

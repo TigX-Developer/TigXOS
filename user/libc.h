@@ -1,4 +1,4 @@
-/* user/libc.h — minimal libc for ring-3 (V1.0.65 syscall ABI) */
+/* user/libc.h — minimal libc for ring-3 (1.1.12 syscall ABI) */
 #ifndef USER_LIBC_H
 #define USER_LIBC_H
 
@@ -27,6 +27,10 @@
 #define SYS_BRK        18   /* new_brk → previous brk or -1 */
 #define SYS_CHDIR      19
 #define SYS_GETCWD     20
+#define SYS_SYSINFO    21
+#define SYS_PSINFO     22
+#define SYS_MKDIR      24
+#define SYS_HALT       23   /* power off / hang cleanly */
 #define SIGINT   2
 #define SIGKILL  9
 #define SIGTERM 15
@@ -47,6 +51,21 @@ struct dirent {
     uint32_t size;
 } __attribute__((packed));
 
+struct sys_sysinfo {
+    uint32_t uptime_sec;
+    uint32_t ticks;
+    uint32_t hz;
+    uint32_t mem_total_kb;
+    uint32_t mem_free_kb;
+    uint32_t fs_files;
+    uint32_t fs_blocks;
+    uint32_t fs_free_blocks;
+    uint32_t rtc_year, rtc_mon, rtc_day;
+    uint32_t rtc_hour, rtc_min, rtc_sec;
+    char     arch[16];
+    char     version[24];
+};
+
 struct stat {
     uint32_t size;
     uint32_t mode;
@@ -62,6 +81,24 @@ long read(int fd, void *buf, size_t n);
 int  open(const char *path, int flags);
 int  chdir(const char *path);
 int  getcwd(char *buf, size_t size);
+int  sysinfo(struct sys_sysinfo *info);
+
+/* Process table snapshot (SYS_PSINFO) */
+struct sys_proc_info {
+    int  pid;
+    int  ppid;
+    int  state;       /* 0 unused 1 ready 2 running 3 blocked 4 dead */
+    int  is_user;
+    int  exit_status;
+    char name[32];
+};
+#define SYS_PSINFO_MAX 16
+struct sys_psinfo {
+    int count;
+    struct sys_proc_info procs[SYS_PSINFO_MAX];
+};
+int  psinfo(struct sys_psinfo *info);  /* returns count or -1 */
+void halt(void);                      /* SYS_HALT — stop the machine */
 int  close(int fd);
 int  dup(int oldfd);
 int  dup2(int oldfd, int newfd);
@@ -71,6 +108,7 @@ int  kill_sig(int pid, int sig);
 int  setfg(int pid);            /* 0 = clear fg job */
 int  getdents(void *buf, size_t n);
 int  unlink(const char *path);
+int  mkdir(const char *path);
 int  stat(const char *path, struct stat *st);
 int  spawn(const char *path, char *const argv[]); /* env from shell via spawn_env */
 int  spawn_env(const char *path, char *const argv[], char *const envp[]);

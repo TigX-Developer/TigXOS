@@ -1,0 +1,8 @@
+// importdemo.gl — import another .gl file
+import "libmath.gl"
+
+fn main() {
+    let n: int = 21
+    print("twice", twice(n))
+    exit(0)
+}

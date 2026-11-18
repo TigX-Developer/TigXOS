@@ -1,4 +1,6 @@
-/* elf.c — ELF32 / ELF64 ET_EXEC loader — V1.0.58 (hardened) */
+/* elf.c — ELF32 / ELF64 ET_EXEC loader — 1.1.12 (hardened) */
+
+
 #include "elf.h"
 #include "aspace.h"
 #include "memory.h"

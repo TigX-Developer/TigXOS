@@ -1,4 +1,6 @@
-// sync.c - Mutex and semaphore for TigxOS V1.0.58
+
+
+// sync.c - Mutex and semaphore for TigxOS 1.1.12
 #include "sync.h"
 #include "process.h"
 #include "console.h"

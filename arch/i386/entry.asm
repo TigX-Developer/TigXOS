@@ -1,5 +1,5 @@
 ; arch/i386/entry.asm - 32-bit protected-mode kernel entry stub
-; TigxOS V1.0.58
+; TigxOS 1.1.12
 [bits 32]
 
 section .text

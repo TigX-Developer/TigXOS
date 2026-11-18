@@ -1,0 +1,4 @@
+// libmath.gl — imported by importdemo.gl
+fn twice(x: int) -> int {
+    return x + x
+}

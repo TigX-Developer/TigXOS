@@ -145,3 +145,21 @@ make ARCH=x86_64    # rebuilds seeded ELFs
 - Structs / floats
 - Bare `argv` without an index
 - Nested string concat beyond buffer depth (use carefully)
+
+
+## 1.1.12 — arrays, import, substr
+
+```gl
+import "libmath.gl"
+
+fn main() {
+    let a: int[3] = [1, 2, 3]
+    a[0] = 9
+    print(len("hi"), substr("TigxOS", 0, 3))
+    exit(0)
+}
+```
+
+- Fixed-size **int arrays** only (`int[N]`, N = 1..256).
+- **import "path.gl"** is a textual include relative to the importing file (top-level only; not inside functions or blocks).
+- **substr(s, start, len)** returns a slice (static buffers; keep results short-lived).

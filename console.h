@@ -1,4 +1,6 @@
 // console.h - VGA text console + serial (COM1)
+
+
 #ifndef CONSOLE_H
 #define CONSOLE_H
 
@@ -30,7 +32,7 @@
 #define VGA_WHITE_ON_BLACK    VGA_ATTR(VGA_WHITE, VGA_BLACK)
 #define VGA_ORANGE_ON_BLUE    VGA_ATTR(VGA_YELLOW, VGA_BLUE)
 
-/* --- TigxOS V1.0.58 semantic palette --- */
+/* --- TigxOS 1.1.12 semantic palette --- */
 #define TIG_BG           VGA_BLACK
 #define TIG_FG           VGA_LGRAY
 

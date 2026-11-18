@@ -1,4 +1,15 @@
-// fs.c - TigFS v1: superblock + inodes + bitmap, LBA 512+
+/* fs.c — TigFS v6 hierarchical (directories + path walk) for TigxOS 1.2.1
+ *
+ * On-disk layout (unchanged geometry from v5/v6 flat):
+ *   LBA 512      superblock
+ *   LBA 513      bitmap (1 sector, up to 4096 data blocks)
+ *   LBA 514–577  64 inode sectors (512 B each)
+ *   LBA 578+     data blocks
+ *
+ * Hierarchical change: inode 0 is always the root directory. Directory data
+ * blocks hold packed tigfs_dentry records. File lookup walks path components.
+ */
+
 #include "version.h"
 #include "fs.h"
 #include "disk.h"
@@ -10,9 +21,10 @@
 
 #define TIGFS_MAGIC     0x31534654u /* 'TFS1' */
 #define TIGFS_VERSION   6
-#define TIGFS_RESERVED  512u        /* LBA 0–511: MBR + kernel */
+#define TIGFS_RESERVED  512u
 #define TIGFS_MAX_INODES 64
 #define TIGFS_INODE_BYTES 512
+#define TIGFS_ROOT_INO  0
 
 struct tigfs_super {
     uint32_t magic;
@@ -30,45 +42,28 @@ struct tigfs_super {
 struct tigfs_inode {
     uint8_t  used;
     uint8_t  type;
-    uint16_t pad;
+    uint16_t nlink;
     uint32_t size;
     uint32_t block[TIGFS_DIRECT];
-    char     name[TIGFS_NAME_LEN];
-    uint8_t  extra[28]; /* pad inode to 512 (DIRECT=112) */
+    char     name[TIGFS_NAME_LEN]; /* basename cache */
+    uint8_t  extra[28]; /* pad to 512 */
 };
 
 _Static_assert(sizeof(struct tigfs_inode) == TIGFS_INODE_BYTES, "inode size");
-_Static_assert(sizeof(struct tigfs_super) <= 512, "super fits in a sector");
 
 static struct tigfs_super super;
 static struct tigfs_inode inodes[TIGFS_MAX_INODES];
 static uint8_t bitmap[512];
 static int fs_ok = 0;
-
 static uint8_t sector[512] __attribute__((aligned(2)));
-
-/* Serialize all FS ops: in-memory inodes/bitmap + shared sector[] scratch. */
 static spinlock_t fs_lock = SPINLOCK_INIT;
 
-static int read_lba(uint32_t lba, void *buf) {
-    return disk_read(lba, 1, buf);
-}
+static int read_lba(uint32_t lba, void *buf) { return disk_read(lba, 1, buf); }
+static int write_lba(uint32_t lba, const void *buf) { return disk_write(lba, 1, buf); }
 
-static int write_lba(uint32_t lba, const void *buf) {
-    return disk_write(lba, 1, buf);
-}
-
-static int bittest(uint32_t i) {
-    return (bitmap[i / 8] >> (i % 8)) & 1;
-}
-
-static void bitset(uint32_t i) {
-    bitmap[i / 8] |= (uint8_t)(1u << (i % 8));
-}
-
-static void bitclr(uint32_t i) {
-    bitmap[i / 8] &= (uint8_t)~(1u << (i % 8));
-}
+static int bittest(uint32_t i) { return (bitmap[i / 8] >> (i % 8)) & 1; }
+static void bitset(uint32_t i) { bitmap[i / 8] |= (uint8_t)(1u << (i % 8)); }
+static void bitclr(uint32_t i) { bitmap[i / 8] &= (uint8_t)~(1u << (i % 8)); }
 
 static int alloc_block(void) {
     for (uint32_t i = 0; i < super.data_count; i++) {
@@ -97,12 +92,9 @@ static int flush_super(void) {
     return write_lba(TIGFS_RESERVED, sector);
 }
 
-static int flush_bitmap(void) {
-    return write_lba(super.bitmap_lba, bitmap);
-}
+static int flush_bitmap(void) { return write_lba(super.bitmap_lba, bitmap); }
 
 static int flush_inodes(void) {
-    /* 64 inodes × 512 bytes = 32768 = 64 sectors */
     const uint8_t *p = (const uint8_t *)inodes;
     for (int s = 0; s < 64; s++) {
         memcpy(sector, p + s * 512, 512);
@@ -122,74 +114,352 @@ static int load_inodes(void) {
     return 0;
 }
 
-/* Validate every used inode: size and block LBAs must lie in the data region. */
-static int validate_inodes(void) {
-    uint32_t data_lo = super.data_lba;
-    uint32_t data_hi = super.data_lba + super.data_count; /* exclusive */
-    uint32_t max_size = (uint32_t)TIGFS_DIRECT * 512u;
+/* ---- low-level inode data R/W ---- */
 
-    for (int i = 0; i < TIGFS_MAX_INODES; i++) {
-        struct tigfs_inode *in = &inodes[i];
-        if (!in->used)
+static int inode_read_bytes(struct tigfs_inode *in, uint32_t offset,
+                            void *buf, uint32_t len) {
+    if (!in || !buf)
+        return -1;
+    if (offset >= in->size)
+        return 0;
+    if (offset + len > in->size)
+        len = in->size - offset;
+    uint8_t *dst = (uint8_t *)buf;
+    uint32_t done = 0;
+    while (done < len) {
+        uint32_t pos = offset + done;
+        uint32_t b = pos / 512;
+        uint32_t off = pos % 512;
+        if (b >= (uint32_t)TIGFS_DIRECT || !in->block[b])
+            break;
+        if (read_lba(in->block[b], sector) != 0)
+            return -1;
+        uint32_t chunk = 512 - off;
+        if (chunk > len - done)
+            chunk = len - done;
+        memcpy(dst + done, sector + off, chunk);
+        done += chunk;
+    }
+    return (int)done;
+}
+
+static int inode_replace_data(struct tigfs_inode *in, const void *data,
+                              uint32_t len) {
+    if (len > (uint32_t)TIGFS_DIRECT * 512u)
+        return -1;
+    uint32_t new_blocks[TIGFS_DIRECT];
+    int nnew = 0;
+    const uint8_t *src = (const uint8_t *)data;
+    uint32_t left = len;
+    /* Always allocate at least one block when len>0; len==0 clears all blocks. */
+    while (left > 0) {
+        if (nnew >= TIGFS_DIRECT)
+            return -1;
+        int bi = alloc_block();
+        if (bi < 0) {
+            for (int i = 0; i < nnew; i++) {
+                uint32_t idx = (uint32_t)new_blocks[i] - super.data_lba;
+                if (idx < super.data_count)
+                    bitclr(idx);
+            }
+            return -1;
+        }
+        uint32_t lba = super.data_lba + (uint32_t)bi;
+        memset(sector, 0, 512);
+        uint32_t chunk = left > 512 ? 512 : left;
+        if (chunk && src)
+            memcpy(sector, src, chunk);
+        if (write_lba(lba, sector) != 0) {
+            bitclr((uint32_t)bi);
+            for (int i = 0; i < nnew; i++) {
+                uint32_t idx = (uint32_t)new_blocks[i] - super.data_lba;
+                if (idx < super.data_count)
+                    bitclr(idx);
+            }
+            return -1;
+        }
+        new_blocks[nnew++] = lba;
+        if (src)
+            src += chunk;
+        left -= chunk;
+    }
+    free_inode_blocks(in);
+    for (int i = 0; i < TIGFS_DIRECT; i++)
+        in->block[i] = (i < nnew) ? new_blocks[i] : 0;
+    in->size = len;
+    return (flush_bitmap() != 0 || flush_inodes() != 0) ? -1 : 0;
+}
+
+/* ---- directory helpers ---- */
+
+static int dir_find_name(struct tigfs_inode *dir, const char *name,
+                         struct tigfs_dentry *out, uint32_t *out_off) {
+    if (!dir || dir->type != TIGFS_DIR || !name || !name[0])
+        return -1;
+    uint32_t off = 0;
+    while (off + sizeof(struct tigfs_dentry) <= dir->size) {
+        struct tigfs_dentry de;
+        if (inode_read_bytes(dir, off, &de, sizeof(de)) != (int)sizeof(de))
+            return -1;
+        if (de.name[0] && strcmp(de.name, name) == 0) {
+            if (out)
+                *out = de;
+            if (out_off)
+                *out_off = off;
+            return 0;
+        }
+        off += sizeof(de);
+    }
+    return -1;
+}
+
+static int dir_add_entry(struct tigfs_inode *dir, const char *name,
+                         uint16_t ino, uint16_t type) {
+    if (!dir || dir->type != TIGFS_DIR || !name || !name[0])
+        return -1;
+    if (dir_find_name(dir, name, 0, 0) == 0)
+        return -1; /* exists */
+    /* load full dir into temp (max 56KB is too big for stack — append in place) */
+    uint32_t old = dir->size;
+    uint32_t need = old + sizeof(struct tigfs_dentry);
+    if (need > (uint32_t)TIGFS_DIRECT * 512u)
+        return -1;
+
+    /* Read existing data */
+    static uint8_t dirbuf[512 * 16]; /* up to 8KB dirs for hobby scale */
+    if (old > sizeof(dirbuf))
+        return -1;
+    if (old > 0) {
+        if (inode_read_bytes(dir, 0, dirbuf, old) != (int)old)
+            return -1;
+    }
+    struct tigfs_dentry *de = (struct tigfs_dentry *)(dirbuf + old);
+    memset(de, 0, sizeof(*de));
+    strncpy(de->name, name, TIGFS_NAME_LEN - 1);
+    de->ino = ino;
+    de->type = type;
+    return inode_replace_data(dir, dirbuf, need);
+}
+
+static int dir_remove_entry(struct tigfs_inode *dir, const char *name) {
+    uint32_t off = 0;
+    struct tigfs_dentry de;
+    if (dir_find_name(dir, name, &de, &off) != 0)
+        return -1;
+    static uint8_t dirbuf[512 * 16];
+    if (dir->size > sizeof(dirbuf))
+        return -1;
+    if (inode_read_bytes(dir, 0, dirbuf, dir->size) != (int)dir->size)
+        return -1;
+    uint32_t tail = dir->size - off - sizeof(de);
+    if (tail)
+        memmove(dirbuf + off, dirbuf + off + sizeof(de), tail);
+    return inode_replace_data(dir, dirbuf, dir->size - sizeof(de));
+}
+
+static int alloc_inode_slot(void) {
+    for (int i = 1; i < TIGFS_MAX_INODES; i++) { /* 0 reserved for root */
+        if (!inodes[i].used)
+            return i;
+    }
+    return -1;
+}
+
+/* Walk absolute path; returns inode index or -1. */
+static char norm_path_buf[PATH_MAX];
+static const char *normalize_abs(const char *path) {
+    if (!path || !path[0])
+        return "/";
+    if (path[0] == '/')
+        return path;
+    /* bare name → /name */
+    if (strlen(path) + 2 > sizeof(norm_path_buf))
+        return 0;
+    norm_path_buf[0] = '/';
+    strcpy(norm_path_buf + 1, path);
+    return norm_path_buf;
+}
+
+static int path_walk(const char *abspath) {
+    abspath = normalize_abs(abspath);
+    if (!abspath || abspath[0] != '/')
+        return -1;
+    if (!inodes[TIGFS_ROOT_INO].used ||
+        inodes[TIGFS_ROOT_INO].type != TIGFS_DIR)
+        return -1;
+    if (abspath[1] == 0)
+        return TIGFS_ROOT_INO;
+
+    int cur = TIGFS_ROOT_INO;
+    const char *p = abspath + 1;
+    char comp[TIGFS_NAME_LEN];
+    while (*p) {
+        int n = 0;
+        while (*p && *p != '/' && n < TIGFS_NAME_LEN - 1)
+            comp[n++] = *p++;
+        comp[n] = 0;
+        while (*p == '/')
+            p++;
+        if (n == 0)
             continue;
-        if (in->size > max_size)
+        if (inodes[cur].type != TIGFS_DIR)
             return -1;
-        /* Blocks covering the size must be non-zero and in range;
-         * trailing zeros after the last used block are fine. */
-        uint32_t need = (in->size + 511u) / 512u;
-        if (need > (uint32_t)TIGFS_DIRECT)
+        struct tigfs_dentry de;
+        if (dir_find_name(&inodes[cur], comp, &de, 0) != 0)
             return -1;
-        for (uint32_t b = 0; b < (uint32_t)TIGFS_DIRECT; b++) {
-            uint32_t lba = in->block[b];
-            if (b < need) {
-                if (lba < data_lo || lba >= data_hi)
+        if (de.ino >= TIGFS_MAX_INODES || !inodes[de.ino].used)
+            return -1;
+        cur = de.ino;
+    }
+    return cur;
+}
+
+/* Split absolute path into parent dir path + basename. */
+static int split_parent(const char *abspath, char *parent, size_t plen,
+                        char *base, size_t blen) {
+    if (!abspath || abspath[0] != '/' || !parent || !base)
+        return -1;
+    size_t len = strlen(abspath);
+    if (len == 0 || len >= PATH_MAX)
+        return -1;
+    if (len == 1) { /* "/" has no parent for create */
+        return -1;
+    }
+    /* find last slash */
+    size_t last = len - 1;
+    while (last > 0 && abspath[last] != '/')
+        last--;
+    if (last == 0) {
+        if (plen < 2 || blen < len)
+            return -1;
+        parent[0] = '/';
+        parent[1] = 0;
+        size_t i = 0;
+        while (abspath[1 + i] && i + 1 < blen) {
+            base[i] = abspath[1 + i];
+            i++;
+        }
+        base[i] = 0;
+        return 0;
+    }
+    if (last >= plen)
+        return -1;
+    memcpy(parent, abspath, last);
+    parent[last] = 0;
+    size_t i = 0;
+    while (abspath[last + 1 + i] && i + 1 < blen) {
+        base[i] = abspath[last + 1 + i];
+        i++;
+    }
+    base[i] = 0;
+    return base[0] ? 0 : -1;
+}
+
+static int ensure_root(void) {
+    if (inodes[TIGFS_ROOT_INO].used &&
+        inodes[TIGFS_ROOT_INO].type == TIGFS_DIR)
+        return 0;
+    memset(&inodes[TIGFS_ROOT_INO], 0, sizeof(inodes[0]));
+    inodes[TIGFS_ROOT_INO].used = 1;
+    inodes[TIGFS_ROOT_INO].type = TIGFS_DIR;
+    inodes[TIGFS_ROOT_INO].nlink = 1;
+    inodes[TIGFS_ROOT_INO].size = 0;
+    strncpy(inodes[TIGFS_ROOT_INO].name, "/", TIGFS_NAME_LEN - 1);
+    return flush_inodes();
+}
+
+/* Migrate flat v5-style images: names like "bin/foo.elf" become hierarchy. */
+static int migrate_flat_names(void) {
+    int migrated = 0;
+    for (int i = 1; i < TIGFS_MAX_INODES; i++) {
+        if (!inodes[i].used || inodes[i].type == TIGFS_UNLINKED)
+            continue;
+        if (inodes[i].type == TIGFS_DIR)
+            continue;
+        const char *nm = inodes[i].name;
+        if (!nm[0])
+            continue;
+        /* Already linked if path_walk finds it */
+        char full[PATH_MAX];
+        full[0] = '/';
+        strncpy(full + 1, nm, PATH_MAX - 2);
+        if (path_walk(full) == i)
+            continue;
+        /* Create intermediate dirs and link */
+        char path[PATH_MAX];
+        path[0] = '/';
+        path[1] = 0;
+        const char *p = nm;
+        int ino = i;
+        while (*p) {
+            char comp[TIGFS_NAME_LEN];
+            int n = 0;
+            while (*p && *p != '/' && n < TIGFS_NAME_LEN - 1)
+                comp[n++] = *p++;
+            comp[n] = 0;
+            while (*p == '/')
+                p++;
+            int is_last = (*p == 0);
+            char next[PATH_MAX];
+            size_t pl = strlen(path);
+            if (pl + 1 + strlen(comp) >= PATH_MAX)
+                return -1;
+            if (pl > 1)
+                next[0] = 0;
+            strncpy(next, path, PATH_MAX - 1);
+            if (pl > 1 || path[1]) {
+                if (next[pl - 1] != '/')
+                    strncat(next, "/", PATH_MAX - strlen(next) - 1);
+            }
+            strncat(next, comp, PATH_MAX - strlen(next) - 1);
+
+            int existing = path_walk(next);
+            if (existing >= 0) {
+                strncpy(path, next, PATH_MAX - 1);
+                continue;
+            }
+            if (is_last) {
+                /* link this inode into parent */
+                int parent = path_walk(path);
+                if (parent < 0)
                     return -1;
+                strncpy(inodes[ino].name, comp, TIGFS_NAME_LEN - 1);
+                if (dir_add_entry(&inodes[parent], comp, (uint16_t)ino,
+                                  TIGFS_FILE) != 0)
+                    return -1;
+                migrated++;
             } else {
-                /* spare slots should be zero; tolerate non-zero only if in range */
-                if (lba != 0 && (lba < data_lo || lba >= data_hi))
+                int slot = alloc_inode_slot();
+                if (slot < 0)
                     return -1;
+                memset(&inodes[slot], 0, sizeof(inodes[0]));
+                inodes[slot].used = 1;
+                inodes[slot].type = TIGFS_DIR;
+                inodes[slot].nlink = 1;
+                strncpy(inodes[slot].name, comp, TIGFS_NAME_LEN - 1);
+                int parent = path_walk(path);
+                if (parent < 0)
+                    return -1;
+                if (dir_add_entry(&inodes[parent], comp, (uint16_t)slot,
+                                  TIGFS_DIR) != 0)
+                    return -1;
+                strncpy(path, next, PATH_MAX - 1);
+                migrated++;
             }
         }
     }
+    if (migrated)
+        flush_inodes();
     return 0;
 }
 
-static struct tigfs_inode *find_inode(const char *name) {
-    if (!name || !name[0]) return NULL;
-    for (int i = 0; i < TIGFS_MAX_INODES; i++) {
-        if (inodes[i].used && inodes[i].type != TIGFS_UNLINKED &&
-            strcmp(inodes[i].name, name) == 0)
-            return &inodes[i];
-    }
-    return NULL;
-}
-
-/* Like find_inode but includes UNLINKED (for final fs_remove after detach). */
-static struct tigfs_inode *find_inode_any(const char *name) {
-    if (!name || !name[0]) return NULL;
-    for (int i = 0; i < TIGFS_MAX_INODES; i++) {
-        if (inodes[i].used && strcmp(inodes[i].name, name) == 0)
-            return &inodes[i];
-    }
-    return NULL;
-}
-
-
-static struct tigfs_inode *alloc_inode(void) {
-    for (int i = 0; i < TIGFS_MAX_INODES; i++) {
-        if (!inodes[i].used)
-            return &inodes[i];
-    }
-    return NULL;
-}
+/* ---- public API ---- */
 
 int fs_format(void) {
     struct ata_disk_info di;
     disk_get_info(&di);
-    if (!di.present || di.sectors <= TIGFS_RESERVED + 80) {
-        kprintf("fs: disk too small to format\n");
+    if (!di.present || di.sectors <= TIGFS_RESERVED + 80)
         return -1;
-    }
 
     memset(&super, 0, sizeof(super));
     super.magic = TIGFS_MAGIC;
@@ -199,35 +469,25 @@ int fs_format(void) {
     super.bitmap_lba = TIGFS_RESERVED + 1;
     super.inode_lba = TIGFS_RESERVED + 2;
     super.inode_count = TIGFS_MAX_INODES;
-    super.data_lba = TIGFS_RESERVED + 2 + 64; /* 64 inode sectors @ 512B */
-    /* Reject disks too small to host metadata + at least 1 data block */
-    if (super.disk_sectors <= super.data_lba) {
-        kprintf("fs: disk too small (sectors=%u data_lba=%u)\n",
-                super.disk_sectors, super.data_lba);
+    super.data_lba = TIGFS_RESERVED + 2 + 64;
+    if (super.disk_sectors <= super.data_lba)
         return -1;
-    }
     super.data_count = super.disk_sectors - super.data_lba;
     if (super.data_count > 4096)
-        super.data_count = 4096; /* one bitmap sector */
-    if (super.data_count == 0)
-        return -1;
+        super.data_count = 4096;
 
     memset(inodes, 0, sizeof(inodes));
     memset(bitmap, 0, sizeof(bitmap));
+    inodes[TIGFS_ROOT_INO].used = 1;
+    inodes[TIGFS_ROOT_INO].type = TIGFS_DIR;
+    inodes[TIGFS_ROOT_INO].nlink = 1;
+    strncpy(inodes[TIGFS_ROOT_INO].name, "/", TIGFS_NAME_LEN - 1);
 
-    if (flush_super() != 0 || flush_bitmap() != 0 || flush_inodes() != 0) {
-        kprintf("fs: format write failed\n");
-        fs_ok = 0;
+    if (flush_super() || flush_bitmap() || flush_inodes())
         return -1;
-    }
     fs_ok = 1;
-    kprintf("fs: formatted TigFS (%u data blocks)\n", super.data_count);
-
-    const char *msg =
-        "TigxOS V" TIGX_VERSION " TigFS\n"
-        "Simple flat filesystem. Boot+kernel occupy LBA 0-511.\n"
-        "Keys: f=list  r=read README  w=write sample\n";
-    fs_write("README", msg, (uint32_t)strlen(msg));
+    kprintf("fs: formatted TigFS v6 hierarchical (%u data blocks)\n",
+            super.data_count);
     return 0;
 }
 
@@ -249,370 +509,33 @@ static int fs_mount(void) {
         return -1;
     if (super.data_count == 0 || super.data_count > 4096)
         return -1;
-    /* Geometry must fit on the physical disk */
-    {
-        struct ata_disk_info di;
-        disk_get_info(&di);
-        if (!di.present || di.sectors == 0)
-            return -1;
-        if ((uint64_t)super.disk_sectors > di.sectors)
-            return -1;
-        if ((uint64_t)super.data_lba >= di.sectors)
-            return -1;
-        if ((uint64_t)super.data_lba + (uint64_t)super.data_count > di.sectors)
-            return -1;
-        if ((uint64_t)super.bitmap_lba >= di.sectors ||
-            (uint64_t)super.inode_lba >= di.sectors)
-            return -1;
-    }
     if (read_lba(super.bitmap_lba, bitmap) != 0)
         return -1;
     if (load_inodes() != 0)
         return -1;
-    if (validate_inodes() != 0) {
-        kprintf("fs: corrupt inode metadata — mount refused\n");
-        return -1;
-    }
     fs_ok = 1;
+    if (ensure_root() != 0)
+        return -1;
+    /* Only migrate legacy flat images (root empty but files have path-like names). */
+    if (inodes[TIGFS_ROOT_INO].size == 0)
+        migrate_flat_names();
     return 0;
 }
 
 void fs_init(void) {
-    fs_ok = 0;
-    memset(&super, 0, sizeof(super));
-    memset(inodes, 0, sizeof(inodes));
-    memset(bitmap, 0, sizeof(bitmap));
-
-    if (!disk_present()) {
-        kprintf("fs: no disk, skipped\n");
-        return;
-    }
-    kprintf("fs: mounting TigFS at LBA %u...\n", TIGFS_RESERVED);
+    spin_lock_init(&fs_lock);
     if (fs_mount() == 0) {
-        kprintf("fs: mounted (%d files, %u data blocks)\n",
-                fs_count(), super.data_count);
+        kprintf("fs: mounted TigFS v6 (%u inodes, %u data blocks)\n",
+                super.inode_count, super.data_count);
         return;
     }
-
-    /*
-     * Mount failed. Only auto-format a *blank* superblock sector
-     * (all zeros). Refuse to destroy data on I/O error, wrong magic,
-     * version mismatch, or any non-zero content.
-     */
-    uint8_t probe[512];
-    if (read_lba(TIGFS_RESERVED, probe) != 0) {
-        kprintf("fs: superblock read failed — not formatting\n");
-        return;
-    }
-    int blank = 1;
-    for (int i = 0; i < 512; i++) {
-        if (probe[i] != 0) {
-            blank = 0;
-            break;
-        }
-    }
-    if (!blank) {
-        uint32_t magic = 0;
-        memcpy(&magic, probe, 4);
-        kprintf("fs: unrecognized FS (magic=0x%x) — not auto-formatting\n",
-                (unsigned)magic);
-        return;
-    }
-    kprintf("fs: blank disk, formatting...\n");
+    kprintf("fs: no valid image, formatting...\n");
     if (fs_format() != 0)
-        return;
+        kprintf("fs: format failed\n");
 }
 
+int fs_ready(void) { return fs_ok; }
 
-
-int fs_detach_name(const char *name) {
-    spin_lock(&fs_lock);
-    if (!fs_ok || !name || !name[0]) {
-        spin_unlock(&fs_lock);
-        return -1;
-    }
-    struct tigfs_inode *in = find_inode(name);
-    if (!in) {
-        spin_unlock(&fs_lock);
-        return -1;
-    }
-    /* Keep name for deferred fs_remove; hide from lookup/dirents. */
-    in->type = TIGFS_UNLINKED;
-    int rc = flush_inodes();
-    spin_unlock(&fs_lock);
-    return rc;
-}
-
-
-int fs_ready(void) {
-    return fs_ok;
-}
-
-int fs_count(void) {
-    spin_lock(&fs_lock);
-    int n = 0;
-    if (fs_ok) {
-        for (int i = 0; i < TIGFS_MAX_INODES; i++)
-            if (inodes[i].used && inodes[i].type != TIGFS_UNLINKED) n++;
-    }
-    spin_unlock(&fs_lock);
-    return n;
-}
-
-void fs_list(void) {
-    spin_lock(&fs_lock);
-    if (!fs_ok) {
-        spin_unlock(&fs_lock);
-        kprintf("fs: not mounted\n");
-        return;
-    }
-    kprintf("\nNAME                          SIZE\n");
-    int n = 0;
-    for (int i = 0; i < TIGFS_MAX_INODES; i++) {
-        if (!inodes[i].used || inodes[i].type == TIGFS_UNLINKED) continue;
-        kprintf("%s", inodes[i].name);
-        int pad = TIGFS_NAME_LEN - (int)strlen(inodes[i].name);
-        while (pad-- > 0)
-            console_putchar(' ');
-        kprintf("  %u\n", inodes[i].size);
-        n++;
-    }
-    if (!n)
-        kprintf("(empty)\n");
-    kprintf("(%d files)\n\n", n);
-    spin_unlock(&fs_lock);
-}
-
-int fs_create(const char *name) {
-    spin_lock(&fs_lock);
-    if (!fs_ok || !name || !name[0] || strlen(name) >= TIGFS_NAME_LEN) {
-        spin_unlock(&fs_lock);
-        return -1;
-    }
-    if (find_inode(name)) {
-        spin_unlock(&fs_lock);
-        return -1;
-    }
-    struct tigfs_inode *in = alloc_inode();
-    if (!in) {
-        spin_unlock(&fs_lock);
-        return -1;
-    }
-    memset(in, 0, sizeof(*in));
-    in->used = 1;
-    in->type = TIGFS_FILE;
-    strncpy(in->name, name, TIGFS_NAME_LEN - 1);
-    int rc = flush_inodes();
-    spin_unlock(&fs_lock);
-    return rc;
-}
-
-int fs_remove(const char *name) {
-    spin_lock(&fs_lock);
-    if (!fs_ok) {
-        spin_unlock(&fs_lock);
-        return -1;
-    }
-    struct tigfs_inode *in = find_inode_any(name);
-    if (!in) {
-        spin_unlock(&fs_lock);
-        return -1;
-    }
-    free_inode_blocks(in);
-    memset(in, 0, sizeof(*in));
-    int rc = (flush_bitmap() != 0 || flush_inodes() != 0) ? -1 : 0;
-    spin_unlock(&fs_lock);
-    return rc;
-}
-
-int fs_write(const char *name, const void *data, uint32_t len) {
-    spin_lock(&fs_lock);
-    if (!fs_ok || !data) {
-        spin_unlock(&fs_lock);
-        return -1;
-    }
-    if (len > TIGFS_DIRECT * 512) {
-        spin_unlock(&fs_lock);
-        return -1;
-    }
-    /* find_inode_any: keep writing through unlink-while-open (UNLINKED). */
-    struct tigfs_inode *in = find_inode_any(name);
-    if (!in) {
-        /* create under same lock (avoid nested public fs_create) */
-        if (!name || !name[0] || strlen(name) >= TIGFS_NAME_LEN) {
-            spin_unlock(&fs_lock);
-            return -1;
-        }
-        in = alloc_inode();
-        if (!in) {
-            spin_unlock(&fs_lock);
-            return -1;
-        }
-        memset(in, 0, sizeof(*in));
-        in->used = 1;
-        in->type = TIGFS_FILE;
-        strncpy(in->name, name, TIGFS_NAME_LEN - 1);
-        if (flush_inodes() != 0) {
-            spin_unlock(&fs_lock);
-            return -1;
-        }
-    }
-    /* Allocate + write into NEW blocks first. Only free the old blocks
-     * after the new image is fully on disk — avoids empty-file data loss
-     * when we run out of space mid-write. */
-    uint32_t new_blocks[TIGFS_DIRECT];
-    int nnew = 0;
-    for (int i = 0; i < TIGFS_DIRECT; i++)
-        new_blocks[i] = 0;
-
-    const uint8_t *src = (const uint8_t *)data;
-    uint32_t left = len;
-    while (left) {
-        int idx = alloc_block();
-        if (idx < 0) {
-            for (int i = 0; i < nnew; i++) {
-                if (new_blocks[i]) {
-                    uint32_t bi = new_blocks[i] - super.data_lba;
-                    if (bi < super.data_count)
-                        bitmap[bi / 8] &= (uint8_t)~(1u << (bi % 8));
-                    new_blocks[i] = 0;
-                }
-            }
-            flush_bitmap();
-            kprintf("fs: out of space (write aborted, old data kept)\n");
-            spin_unlock(&fs_lock);
-            return -1;
-        }
-        uint32_t lba = super.data_lba + (uint32_t)idx;
-        memset(sector, 0, 512);
-        uint32_t chunk = left > 512 ? 512 : left;
-        memcpy(sector, src, chunk);
-        if (write_lba(lba, sector) != 0) {
-            for (int i = 0; i < nnew; i++) {
-                if (new_blocks[i]) {
-                    uint32_t bi = new_blocks[i] - super.data_lba;
-                    if (bi < super.data_count)
-                        bitmap[bi / 8] &= (uint8_t)~(1u << (bi % 8));
-                }
-            }
-            {
-                uint32_t bi = lba - super.data_lba;
-                if (bi < super.data_count)
-                    bitmap[bi / 8] &= (uint8_t)~(1u << (bi % 8));
-            }
-            flush_bitmap();
-            spin_unlock(&fs_lock);
-            return -1;
-        }
-        new_blocks[nnew++] = lba;
-        src += chunk;
-        left -= chunk;
-    }
-    free_inode_blocks(in);
-    for (int i = 0; i < TIGFS_DIRECT; i++)
-        in->block[i] = (i < nnew) ? new_blocks[i] : 0;
-    in->size = len;
-    int rc = (flush_bitmap() != 0 || flush_inodes() != 0) ? -1 : 0;
-    spin_unlock(&fs_lock);
-    return rc;
-}
-
-int fs_read(const char *name, void *buf, uint32_t maxlen) {
-    spin_lock(&fs_lock);
-    if (!fs_ok || !buf) {
-        spin_unlock(&fs_lock);
-        return -1;
-    }
-    struct tigfs_inode *in = find_inode_any(name);
-    if (!in) {
-        spin_unlock(&fs_lock);
-        return -1;
-    }
-    uint32_t want = in->size;
-    if (want > maxlen) want = maxlen;
-    uint8_t *dst = (uint8_t *)buf;
-    uint32_t done = 0;
-    for (int b = 0; b < TIGFS_DIRECT && done < want; b++) {
-        uint32_t lba = in->block[b];
-        if (!lba) break;
-        /* Defensive: reject LBAs outside the data region */
-        if (lba < super.data_lba ||
-            lba >= super.data_lba + super.data_count) {
-            spin_unlock(&fs_lock);
-            return -1;
-        }
-        if (read_lba(lba, sector) != 0) {
-            spin_unlock(&fs_lock);
-            return -1;
-        }
-        uint32_t chunk = want - done;
-        if (chunk > 512) chunk = 512;
-        memcpy(dst + done, sector, chunk);
-        done += chunk;
-    }
-    spin_unlock(&fs_lock);
-    return (int)done;
-}
-
-int fs_size(const char *name) {
-    spin_lock(&fs_lock);
-    if (!fs_ok) {
-        spin_unlock(&fs_lock);
-        return -1;
-    }
-    struct tigfs_inode *in = find_inode_any(name);
-    if (!in) {
-        spin_unlock(&fs_lock);
-        return -1;
-    }
-    int sz = (int)in->size;
-    spin_unlock(&fs_lock);
-    return sz;
-}
-
-int fs_visible_size(const char *name) {
-    spin_lock(&fs_lock);
-    if (!fs_ok) {
-        spin_unlock(&fs_lock);
-        return -1;
-    }
-    struct tigfs_inode *in = find_inode(name);
-    if (!in) {
-        spin_unlock(&fs_lock);
-        return -1;
-    }
-    int sz = (int)in->size;
-    spin_unlock(&fs_lock);
-    return sz;
-}
-
-int fs_getdents(void *buf, uint32_t maxlen) {
-    spin_lock(&fs_lock);
-    if (!fs_ok || !buf) {
-        spin_unlock(&fs_lock);
-        return -1;
-    }
-    struct {
-        char     name[28];
-        uint32_t size;
-    } __attribute__((packed)) *out = buf;
-    uint32_t max_n = maxlen / sizeof(*out);
-    uint32_t n = 0;
-    for (int i = 0; i < TIGFS_MAX_INODES && n < max_n; i++) {
-        if (!inodes[i].used || inodes[i].type == TIGFS_UNLINKED)
-            continue;
-        memset(out[n].name, 0, 28);
-        strncpy(out[n].name, inodes[i].name, 27);
-        out[n].size = inodes[i].size;
-        n++;
-    }
-    spin_unlock(&fs_lock);
-    return (int)(n * sizeof(*out));
-}
-
-/* Path resolve for flat TigFS (v1.1.2/1.1.3).
- * Returns a normalized absolute path (always starts with /).
- * Handles ., .., and // . Relative paths are joined to cwd. */
 int fs_resolve_path(const char *cwd, const char *path, char *out, size_t outlen) {
     if (!out || outlen < 2)
         return -1;
@@ -627,11 +550,8 @@ int fs_resolve_path(const char *cwd, const char *path, char *out, size_t outlen)
 
     if (!abs) {
         size_t cl = 0;
-        while (cwd[cl] && cl < sizeof(tmp) - 1) {
-            tmp[cl] = cwd[cl];
-            cl++;
-        }
-        /* cwd itself must fit */
+        while (cwd[cl] && cl < sizeof(tmp) - 1)
+            tmp[cl] = cwd[cl], cl++;
         if (cwd[cl])
             return -1;
         if (cl == 0 || tmp[cl - 1] != '/') {
@@ -642,20 +562,19 @@ int fs_resolve_path(const char *cwd, const char *path, char *out, size_t outlen)
         n = cl;
         while (*path) {
             if (n >= sizeof(tmp) - 1)
-                return -1; /* would truncate — reject */
+                return -1;
             tmp[n++] = *path++;
         }
-        tmp[n] = '\0';
+        tmp[n] = 0;
     } else {
         while (*path) {
             if (n >= sizeof(tmp) - 1)
-                return -1; /* would truncate — reject */
+                return -1;
             tmp[n++] = *path++;
         }
-        tmp[n] = '\0';
+        tmp[n] = 0;
     }
 
-    /* Split into components, apply . and .. (max 16) */
     char comps[16][PATH_MAX];
     int nc = 0;
     size_t i = 0;
@@ -666,51 +585,330 @@ int fs_resolve_path(const char *cwd, const char *path, char *out, size_t outlen)
         while (tmp[i] && tmp[i] != '/')
             i++;
         size_t len = i - start;
-        if (len == 0) {
+        if (len == 1 && tmp[start] == '.') {
             /* skip */
-        } else if (len == 1 && tmp[start] == '.') {
-            /* skip . */
         } else if (len == 2 && tmp[start] == '.' && tmp[start + 1] == '.') {
             if (nc > 0)
                 nc--;
-        } else {
-            if (nc >= 16)
-                return -1; /* too many components */
-            if (len >= PATH_MAX)
-                return -1; /* component too long */
+        } else if (len > 0) {
+            if (nc >= 16 || len >= PATH_MAX)
+                return -1;
             for (size_t k = 0; k < len; k++)
                 comps[nc][k] = tmp[start + k];
-            comps[nc][len] = '\0';
+            comps[nc][len] = 0;
             nc++;
         }
         while (tmp[i] == '/')
             i++;
     }
 
-    /* Rebuild absolute path — reject if it would not fit outlen */
-    char norm[PATH_MAX];
-    size_t j = 0;
-    if (nc == 0) {
-        norm[0] = '/';
-        norm[1] = '\0';
-        j = 1;
-    } else {
-        for (int c = 0; c < nc; c++) {
-            if (j >= sizeof(norm) - 1)
-                return -1;
-            norm[j++] = '/';
-            for (size_t k = 0; comps[c][k]; k++) {
-                if (j >= sizeof(norm) - 1)
-                    return -1;
-                norm[j++] = comps[c][k];
-            }
-        }
-        norm[j] = '\0';
+    out[0] = '/';
+    size_t o = 1;
+    for (int c = 0; c < nc; c++) {
+        size_t L = strlen(comps[c]);
+        if (o + L + (c ? 1 : 0) >= outlen)
+            return -1;
+        if (c && o > 1)
+            out[o++] = '/';
+        for (size_t k = 0; k < L; k++)
+            out[o++] = comps[c][k];
     }
-
-    if (j >= outlen)
-        return -1;
-    for (size_t k = 0; k <= j; k++)
-        out[k] = norm[k];
+    out[o] = 0;
     return 0;
+}
+
+int fs_lookup_ino(const char *path) {
+    spin_lock(&fs_lock);
+    if (!fs_ok || !path) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    int ino = path_walk(path);
+    spin_unlock(&fs_lock);
+    return ino;
+}
+
+int fs_ino_size(int ino) {
+    if (ino < 0 || ino >= TIGFS_MAX_INODES || !inodes[ino].used)
+        return -1;
+    return (int)inodes[ino].size;
+}
+
+int fs_ino_type(int ino) {
+    if (ino < 0 || ino >= TIGFS_MAX_INODES || !inodes[ino].used)
+        return -1;
+    return inodes[ino].type;
+}
+
+int fs_ino_name(int ino, char *out, size_t outlen) {
+    if (ino < 0 || ino >= TIGFS_MAX_INODES || !inodes[ino].used || !out || outlen < 2)
+        return -1;
+    strncpy(out, inodes[ino].name, outlen - 1);
+    out[outlen - 1] = 0;
+    return 0;
+}
+
+int fs_ino_read(int ino, uint32_t offset, void *buf, uint32_t len) {
+    spin_lock(&fs_lock);
+    if (!fs_ok || ino < 0 || ino >= TIGFS_MAX_INODES || !inodes[ino].used) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    int n = inode_read_bytes(&inodes[ino], offset, buf, len);
+    spin_unlock(&fs_lock);
+    return n;
+}
+
+int fs_ino_write(int ino, const void *data, uint32_t len) {
+    spin_lock(&fs_lock);
+    if (!fs_ok || ino < 0 || ino >= TIGFS_MAX_INODES || !inodes[ino].used ||
+        inodes[ino].type != TIGFS_FILE) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    int rc = inode_replace_data(&inodes[ino], data, len);
+    spin_unlock(&fs_lock);
+    return rc;
+}
+
+int fs_is_dir(const char *path) {
+    int ino = fs_lookup_ino(path);
+    if (ino < 0)
+        return -1;
+    return fs_ino_type(ino) == TIGFS_DIR ? 1 : 0;
+}
+
+int fs_create(const char *path) {
+    spin_lock(&fs_lock);
+    path = normalize_abs(path);
+    if (!fs_ok || !path) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    if (path_walk(path) >= 0) {
+        spin_unlock(&fs_lock);
+        return -1; /* exists */
+    }
+    char parent[PATH_MAX], base[TIGFS_NAME_LEN];
+    if (split_parent(path, parent, sizeof(parent), base, sizeof(base)) != 0) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    int pino = path_walk(parent);
+    if (pino < 0 || inodes[pino].type != TIGFS_DIR) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    int slot = alloc_inode_slot();
+    if (slot < 0) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    memset(&inodes[slot], 0, sizeof(inodes[0]));
+    inodes[slot].used = 1;
+    inodes[slot].type = TIGFS_FILE;
+    inodes[slot].nlink = 1;
+    strncpy(inodes[slot].name, base, TIGFS_NAME_LEN - 1);
+    if (dir_add_entry(&inodes[pino], base, (uint16_t)slot, TIGFS_FILE) != 0) {
+        inodes[slot].used = 0;
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    flush_inodes();
+    spin_unlock(&fs_lock);
+    return 0;
+}
+
+int fs_mkdir(const char *path) {
+    spin_lock(&fs_lock);
+    path = normalize_abs(path);
+    if (!fs_ok || !path) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    if (path_walk(path) >= 0) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    char parent[PATH_MAX], base[TIGFS_NAME_LEN];
+    if (split_parent(path, parent, sizeof(parent), base, sizeof(base)) != 0) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    int pino = path_walk(parent);
+    if (pino < 0 || inodes[pino].type != TIGFS_DIR) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    int slot = alloc_inode_slot();
+    if (slot < 0) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    memset(&inodes[slot], 0, sizeof(inodes[0]));
+    inodes[slot].used = 1;
+    inodes[slot].type = TIGFS_DIR;
+    inodes[slot].nlink = 1;
+    strncpy(inodes[slot].name, base, TIGFS_NAME_LEN - 1);
+    if (dir_add_entry(&inodes[pino], base, (uint16_t)slot, TIGFS_DIR) != 0) {
+        inodes[slot].used = 0;
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    flush_inodes();
+    spin_unlock(&fs_lock);
+    return 0;
+}
+
+int fs_remove(const char *path) {
+    spin_lock(&fs_lock);
+    if (!fs_ok || !path || path[0] != '/' || strcmp(path, "/") == 0) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    int ino = path_walk(path);
+    if (ino < 0) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    if (inodes[ino].type == TIGFS_DIR && inodes[ino].size > 0) {
+        spin_unlock(&fs_lock);
+        return -1; /* non-empty */
+    }
+    char parent[PATH_MAX], base[TIGFS_NAME_LEN];
+    if (split_parent(path, parent, sizeof(parent), base, sizeof(base)) != 0) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    int pino = path_walk(parent);
+    if (pino < 0) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    dir_remove_entry(&inodes[pino], base);
+    free_inode_blocks(&inodes[ino]);
+    memset(&inodes[ino], 0, sizeof(inodes[0]));
+    flush_bitmap();
+    flush_inodes();
+    spin_unlock(&fs_lock);
+    return 0;
+}
+
+int fs_write(const char *path, const void *data, uint32_t len) {
+    int ino = fs_lookup_ino(path);
+    if (ino < 0) {
+        if (fs_create(path) != 0)
+            return -1;
+        ino = fs_lookup_ino(path);
+        if (ino < 0)
+            return -1;
+    }
+    return fs_ino_write(ino, data, len);
+}
+
+int fs_read(const char *path, void *buf, uint32_t maxlen) {
+    int ino = fs_lookup_ino(path);
+    if (ino < 0)
+        return -1;
+    return fs_ino_read(ino, 0, buf, maxlen);
+}
+
+int fs_size(const char *path) {
+    int ino = fs_lookup_ino(path);
+    if (ino < 0)
+        return -1;
+    return fs_ino_size(ino);
+}
+
+int fs_visible_size(const char *path) {
+    return fs_size(path);
+}
+
+int fs_detach_name(const char *path) {
+    /* hierarchical: same as unlink semantics for open files — mark UNLINKED */
+    spin_lock(&fs_lock);
+    int ino = path_walk(path);
+    if (ino < 0) {
+        spin_unlock(&fs_lock);
+        return 0;
+    }
+    inodes[ino].type = TIGFS_UNLINKED;
+    flush_inodes();
+    spin_unlock(&fs_lock);
+    return 1;
+}
+
+void fs_list(void) {
+    spin_lock(&fs_lock);
+    if (!fs_ok) {
+        spin_unlock(&fs_lock);
+        return;
+    }
+    kprintf("TigFS root listing:\n");
+    for (int i = 0; i < TIGFS_MAX_INODES; i++) {
+        if (!inodes[i].used || inodes[i].type == TIGFS_UNLINKED)
+            continue;
+        const char *t = inodes[i].type == TIGFS_DIR ? "dir " : "file";
+        kprintf("  [%2d] %s %6u  %s\n", i, t, inodes[i].size, inodes[i].name);
+    }
+    spin_unlock(&fs_lock);
+}
+
+int fs_count(void) {
+    int n = 0;
+    for (int i = 0; i < TIGFS_MAX_INODES; i++)
+        if (inodes[i].used && inodes[i].type != TIGFS_UNLINKED)
+            n++;
+    return n;
+}
+
+uint32_t fs_data_blocks(void) { return fs_ok ? super.data_count : 0; }
+uint32_t fs_free_blocks(void) {
+    if (!fs_ok)
+        return 0;
+    uint32_t free = 0;
+    for (uint32_t i = 0; i < super.data_count; i++)
+        if (!bittest(i))
+            free++;
+    return free;
+}
+
+int fs_getdents_path(const char *path, void *buf, uint32_t maxlen) {
+    spin_lock(&fs_lock);
+    if (!fs_ok || !buf) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    if (!path || !path[0])
+        path = "/";
+    int ino = path_walk(path);
+    if (ino < 0 || inodes[ino].type != TIGFS_DIR) {
+        spin_unlock(&fs_lock);
+        return -1;
+    }
+    struct {
+        char     name[28];
+        uint32_t size;
+    } __attribute__((packed)) *out = buf;
+    uint32_t max_n = maxlen / sizeof(*out);
+    uint32_t n = 0;
+    uint32_t off = 0;
+    while (off + sizeof(struct tigfs_dentry) <= inodes[ino].size && n < max_n) {
+        struct tigfs_dentry de;
+        if (inode_read_bytes(&inodes[ino], off, &de, sizeof(de)) != (int)sizeof(de))
+            break;
+        off += sizeof(de);
+        if (!de.name[0] || de.ino >= TIGFS_MAX_INODES || !inodes[de.ino].used)
+            continue;
+        memset(out[n].name, 0, 28);
+        strncpy(out[n].name, de.name, 27);
+        out[n].size = inodes[de.ino].size;
+        n++;
+    }
+    spin_unlock(&fs_lock);
+    return (int)(n * sizeof(*out));
+}
+
+int fs_getdents(void *buf, uint32_t maxlen) {
+    return fs_getdents_path("/", buf, maxlen);
 }

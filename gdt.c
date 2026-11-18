@@ -1,4 +1,6 @@
-/* gdt.c — reload GDT with user segments + TSS; load TR */
+/* gdt.c — GDT + TSS for ring0/ring3 (TigxOS 1.2.0) */
+
+
 #include "gdt.h"
 #include "console.h"
 #include "string.h"

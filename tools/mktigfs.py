@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 """
-mktigfs.py — build a TigFS filesystem image for TigxOS.
+mktigfs.py — build a hierarchical TigFS v6 image for TigxOS 1.2.1.
 
-Layout (matches fs.c TIGFS_VERSION 6):
-  LBA 0..511   : reserved (boot + kernel) — NOT written by this tool
+Layout:
   LBA 512      : superblock
-  LBA 513      : bitmap (1 sector, up to 4096 data blocks)
-  LBA 514..577 : 64 inode sectors (512 B each)
+  LBA 513      : bitmap
+  LBA 514..577 : 64 inode sectors
   LBA 578+     : data blocks
+
+Inode 0 is always the root directory. Directory data holds 32-byte dentries
+{name[28], ino:u16, type:u16}. Paths like bin/shell.elf create dir "bin"
+and file "shell.elf" inside it.
 
 Usage:
   python3 tools/mktigfs.py -o tigfs.img [--strip] name:path [name:path ...]
-
-  --strip   run `strip -s` on each ELF before embedding (requires strip in PATH)
-  -o FILE   output image (raw sectors starting at LBA 512)
-
-The resulting file is meant to be written into os-image.bin at offset
-512*512 so that boot mounts a pre-populated TigFS and never needs to
-re-seed every program from the kernel image.
 """
 from __future__ import annotations
 import argparse
@@ -27,7 +23,7 @@ import subprocess
 import sys
 import tempfile
 
-TIGFS_MAGIC       = 0x31534654  # 'TFS1'
+TIGFS_MAGIC       = 0x31534654
 TIGFS_VERSION     = 6
 TIGFS_RESERVED    = 512
 TIGFS_MAX_INODES  = 64
@@ -36,73 +32,77 @@ TIGFS_DIRECT      = 112
 TIGFS_NAME_LEN    = 28
 TIGFS_BITMAP_LBA  = TIGFS_RESERVED + 1
 TIGFS_INODE_LBA   = TIGFS_RESERVED + 2
-TIGFS_DATA_LBA    = TIGFS_RESERVED + 2 + 64   # 578
-MAX_DATA_BLOCKS   = 4096                      # one bitmap sector
-
+TIGFS_DATA_LBA    = TIGFS_RESERVED + 2 + 64
+MAX_DATA_BLOCKS   = 4096
+FREE_SLACK_BLOCKS = 1024
 SECTOR = 512
 
-
-def align_up(n: int, a: int) -> int:
-    return (n + a - 1) // a * a
+TIGFS_FILE = 1
+TIGFS_DIR  = 3
 
 
 def make_super(disk_sectors: int, data_count: int) -> bytes:
-    # struct tigfs_super — 12 u32 then pad[7]
     fields = [
-        TIGFS_MAGIC,
-        TIGFS_VERSION,
-        disk_sectors,
-        TIGFS_RESERVED,
-        TIGFS_INODE_LBA,
-        TIGFS_MAX_INODES,
-        TIGFS_BITMAP_LBA,
-        TIGFS_DATA_LBA,
+        TIGFS_MAGIC, TIGFS_VERSION, disk_sectors, TIGFS_RESERVED,
+        TIGFS_INODE_LBA, TIGFS_MAX_INODES, TIGFS_BITMAP_LBA, TIGFS_DATA_LBA,
         data_count,
     ] + [0] * 7
-    blob = struct.pack("<16I", *fields)
-    assert len(blob) == 64
-    return blob.ljust(SECTOR, b"\0")
+    return struct.pack("<16I", *fields).ljust(SECTOR, b"\0")
 
 
-def make_inode(used: int, size: int, blocks: list[int], name: str) -> bytes:
-    # used:u8, type:u8, pad:u16, size:u32, block[80]:u32, name[28], extra[156]
-    typ = 1  # TIGFS_FILE
+def make_inode(used: int, typ: int, size: int, blocks: list[int], name: str) -> bytes:
+    # used:u8 type:u8 nlink:u16 size:u32 block[112] name[28] extra[26]
     buf = bytearray(TIGFS_INODE_BYTES)
     buf[0] = used & 0xFF
-    buf[1] = typ
+    buf[1] = typ & 0xFF
+    struct.pack_into("<H", buf, 2, 1)  # nlink
     struct.pack_into("<I", buf, 4, size)
     for i, b in enumerate(blocks[:TIGFS_DIRECT]):
         struct.pack_into("<I", buf, 8 + i * 4, b)
+    name_off = 8 + TIGFS_DIRECT * 4  # 456
     nb = name.encode("ascii")[: TIGFS_NAME_LEN - 1]
-    buf[8 + TIGFS_DIRECT * 4 : 8 + TIGFS_DIRECT * 4 + len(nb)] = nb
+    buf[name_off : name_off + len(nb)] = nb
+    return bytes(buf)
+
+
+def make_dentry(name: str, ino: int, typ: int) -> bytes:
+    buf = bytearray(32)
+    nb = name.encode("ascii")[: TIGFS_NAME_LEN - 1]
+    buf[0 : len(nb)] = nb
+    struct.pack_into("<HH", buf, 28, ino & 0xFFFF, typ & 0xFFFF)
     return bytes(buf)
 
 
 def strip_elf(path: str) -> bytes:
-    """Return stripped ELF bytes (or original on failure / missing strip)."""
+    tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".elf") as tmp:
             tmp_path = tmp.name
-        subprocess.check_call(["strip", "-s", "-o", tmp_path, path],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        data = open(tmp_path, "rb").read()
-        os.unlink(tmp_path)
-        return data
+        subprocess.check_call(
+            ["strip", "-s", "-o", tmp_path, path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return open(tmp_path, "rb").read()
     except Exception:
         return open(path, "rb").read()
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Build a TigFS image for TigxOS")
-    ap.add_argument("-o", "--output", required=True, help="output tigfs.img")
-    ap.add_argument("--strip", action="store_true", help="strip ELFs before packing")
-    ap.add_argument("--disk-sectors", type=int, default=512 * 1024 * 1024 // 512,
-                    help="total disk sectors (default 512 MB)")
-    ap.add_argument("files", nargs="+", help="name:path pairs (fs name : host path)")
+    ap = argparse.ArgumentParser(description="Build hierarchical TigFS v6 image")
+    ap.add_argument("-o", "--output", required=True)
+    ap.add_argument("--strip", action="store_true")
+    ap.add_argument("--disk-sectors", type=int, default=0)
+    ap.add_argument("entries", nargs="+", help="name:path (name may contain /)")
     args = ap.parse_args()
 
-    entries: list[tuple[str, bytes]] = []
-    for spec in args.files:
+    files: list[tuple[str, bytes]] = []
+    for spec in args.entries:
         if ":" not in spec:
             print(f"error: need name:path, got {spec}", file=sys.stderr)
             return 1
@@ -110,25 +110,27 @@ def main() -> int:
         if not os.path.isfile(path):
             print(f"error: missing {path}", file=sys.stderr)
             return 1
-        if len(name) >= TIGFS_NAME_LEN:
+        if len(name) >= 64:
             print(f"error: name too long: {name}", file=sys.stderr)
             return 1
         data = strip_elf(path) if args.strip else open(path, "rb").read()
         if len(data) > TIGFS_DIRECT * SECTOR:
-            print(f"error: {name} too large ({len(data)} > {TIGFS_DIRECT*SECTOR})",
-                  file=sys.stderr)
+            print(f"error: {name} too large", file=sys.stderr)
             return 1
-        entries.append((name, data))
+        files.append((name.lstrip("/"), data))
 
-    if len(entries) > TIGFS_MAX_INODES:
-        print("error: too many files", file=sys.stderr)
-        return 1
+    # --- allocate inodes: 0=root, then dirs, then files ---
+    inodes = [make_inode(0, 0, 0, [], "")] * TIGFS_MAX_INODES
+    inodes[0] = make_inode(1, TIGFS_DIR, 0, [], "/")
 
-    # Allocate data blocks
-    bitmap = bytearray(SECTOR)  # 4096 bits
+    dir_children: dict[int, list[tuple[str, int, int]]] = {0: []}  # ino -> [(name, child_ino, type)]
+    path_to_ino: dict[str, int] = {"": 0, "/": 0}
+    next_ino = 1
+    bitmap = bytearray(SECTOR)
     next_block = 0
+    data_payload: list[tuple[int, bytes]] = []
 
-    def alloc(n: int) -> list[int]:
+    def alloc_blocks(n: int) -> list[int]:
         nonlocal next_block
         out = []
         for _ in range(n):
@@ -140,53 +142,93 @@ def main() -> int:
             next_block += 1
         return out
 
-    inodes = [make_inode(0, 0, [], "")] * TIGFS_MAX_INODES
-    data_payload: list[tuple[int, bytes]] = []  # (block_index, sector_bytes)
+    def ensure_dir(rel: str) -> int:
+        nonlocal next_ino
+        rel = rel.strip("/")
+        if not rel:
+            return 0
+        if rel in path_to_ino:
+            return path_to_ino[rel]
+        parts = rel.split("/")
+        parent_rel = ""
+        parent_ino = 0
+        for part in parts:
+            cur = f"{parent_rel}/{part}" if parent_rel else part
+            if cur not in path_to_ino:
+                if next_ino >= TIGFS_MAX_INODES:
+                    raise SystemExit("out of inodes")
+                ino = next_ino
+                next_ino += 1
+                inodes[ino] = make_inode(1, TIGFS_DIR, 0, [], part)
+                path_to_ino[cur] = ino
+                dir_children.setdefault(parent_ino, []).append((part, ino, TIGFS_DIR))
+                dir_children.setdefault(ino, [])
+            parent_ino = path_to_ino[cur]
+            parent_rel = cur
+        return parent_ino
 
-    for idx, (name, data) in enumerate(entries):
+    for name, data in files:
+        if "/" in name:
+            parent_rel, base = name.rsplit("/", 1)
+            parent_ino = ensure_dir(parent_rel)
+        else:
+            parent_ino = 0
+            base = name
+        if next_ino >= TIGFS_MAX_INODES:
+            raise SystemExit("out of inodes")
+        ino = next_ino
+        next_ino += 1
         nblocks = (len(data) + SECTOR - 1) // SECTOR if data else 0
-        blocks = alloc(nblocks) if nblocks else []
-        # pad last sector
-        padded = data.ljust(nblocks * SECTOR, b"\0") if nblocks else b""
-        # Kernel stores absolute LBAs in inode.block[] (fs_write does the same)
+        blocks = alloc_blocks(nblocks) if nblocks else []
         abs_blocks = [TIGFS_DATA_LBA + b for b in blocks]
+        padded = data.ljust(nblocks * SECTOR, b"\0") if nblocks else b""
         for bi, blk in enumerate(blocks):
-            sector_data = padded[bi * SECTOR : (bi + 1) * SECTOR]
-            data_payload.append((blk, sector_data))  # payload still relative in image
-        inodes[idx] = make_inode(1, len(data), abs_blocks, name)
+            data_payload.append((blk, padded[bi * SECTOR : (bi + 1) * SECTOR]))
+        inodes[ino] = make_inode(1, TIGFS_FILE, len(data), abs_blocks, base)
+        dir_children.setdefault(parent_ino, []).append((base, ino, TIGFS_FILE))
+        path_to_ino[name] = ino
 
-    data_count = max(next_block, 1)
-    # Cap like the kernel
+    # Write directory data for each dir that has children
+    for dino, children in dir_children.items():
+        if not children:
+            continue
+        blob = b"".join(make_dentry(n, c, t) for n, c, t in children)
+        nblocks = (len(blob) + SECTOR - 1) // SECTOR
+        blocks = alloc_blocks(nblocks)
+        abs_blocks = [TIGFS_DATA_LBA + b for b in blocks]
+        padded = blob.ljust(nblocks * SECTOR, b"\0")
+        for bi, blk in enumerate(blocks):
+            data_payload.append((blk, padded[bi * SECTOR : (bi + 1) * SECTOR]))
+        name = "/" if dino == 0 else inodes[dino][456:456 + TIGFS_NAME_LEN].split(b"\0")[0].decode("ascii", "ignore")
+        inodes[dino] = make_inode(1, TIGFS_DIR, len(blob), abs_blocks, name if dino else "/")
+
+    data_count = max(next_block, 1) + FREE_SLACK_BLOCKS
     if data_count > MAX_DATA_BLOCKS:
         data_count = MAX_DATA_BLOCKS
-
     disk_sectors = args.disk_sectors
     if disk_sectors <= TIGFS_DATA_LBA + data_count:
         disk_sectors = TIGFS_DATA_LBA + data_count + 64
 
-    # Build image: sectors from LBA 512 onward
-    # We write: super, bitmap, 64 inode sectors, then data blocks
     n_sectors = 1 + 1 + 64 + data_count
     img = bytearray(n_sectors * SECTOR)
 
-    def put(lba_from_512: int, data: bytes):
-        off = lba_from_512 * SECTOR
+    def put(rel: int, data: bytes):
+        off = rel * SECTOR
         img[off : off + len(data)] = data
 
-    put(0, make_super(disk_sectors, data_count))          # LBA 512
-    put(1, bytes(bitmap))                                 # LBA 513
+    put(0, make_super(disk_sectors, data_count))
+    put(1, bytes(bitmap))
     for i, ino in enumerate(inodes):
-        put(2 + i, ino)                                   # LBA 514+
+        put(2 + i, ino)
     for blk, sec in data_payload:
-        put(66 + blk, sec)                                # data starts at relative 66
+        put(66 + blk, sec)
 
     with open(args.output, "wb") as f:
         f.write(img)
 
-    total = sum(len(d) for _, d in entries)
     print(f"mktigfs: wrote {args.output} ({len(img)} bytes, "
-          f"{len(entries)} files, {total} data bytes, {data_count} blocks)")
-    for name, data in entries:
+          f"{len(files)} files, hierarchical, {data_count} blocks)")
+    for name, data in files:
         print(f"  {name:20s} {len(data):7d} B")
     return 0
 

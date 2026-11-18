@@ -80,5 +80,4 @@ extern void syscall_stub(void);
 #define ARCH_KERNEL_CS  0x08
 #define ARCH_KERNEL_DS  0x10
 
-
 #endif /* ARCH_ARCH_H */

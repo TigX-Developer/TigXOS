@@ -1,5 +1,5 @@
 ; arch/x86_64/boot.asm - E820 + 1GB identity + LBA load + CHS fallback (255H/63S)
-; TigxOS V1.0.58 — arch split (boot layer)
+; TigxOS 1.1.12 — arch split (boot layer)
 [org 0x7c00]
 [bits 16]
 
@@ -7,7 +7,7 @@ KERNEL_OFFSET  equ 0x10000
 MEMMAP_COUNT   equ 0x9000
 MEMMAP_ENTRIES equ 0x9004
 MEMMAP_MAX     equ 64
-KERNEL_SECTS   equ 288
+KERNEL_SECTS   equ 320
 
 start:
     xor ax, ax

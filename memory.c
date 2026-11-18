@@ -1,4 +1,7 @@
-// memory.c - TigxOS V1.0.58 PMM/VMM/heap
+/* memory.c — PMM / VMM / kernel heap (TigxOS 1.2.0) */
+
+
+
 #include "memory.h"
 #include "console.h"
 #include "string.h"
@@ -324,8 +327,20 @@ int vmm_map_page(void *physical, void *virtual_addr, uintptr_t flags) {
     if (!pd) return -1;
 
     if (pd[pd_i] & PAGE_HUGE) {
-        kprintf("vmm_map: target covered by 2MB page (no split yet)\n");
-        return -1;
+        /* Split 2 MB identity page into a 4 KB page table, preserve maps. */
+        void *ptf = pmm_alloc_frame();
+        if (!ptf) {
+            kprintf("vmm_map: cannot split 2MB page (OOM)\n");
+            return -1;
+        }
+        pte_t *npt = (pte_t *)ptf;
+        uint64_t base = pd[pd_i] & ~0x1FFFFFULL;
+        uint64_t fl = pd[pd_i] & (PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
+        for (int k = 0; k < 512; k++)
+            npt[k] = (base + (uint64_t)k * PAGE_SIZE) | fl;
+        pd[pd_i] = ((uint64_t)ptf) | PAGE_PRESENT | PAGE_WRITE |
+                   (fl & PAGE_USER);
+        /* fall through to map the requested 4 KB page */
     }
 
     pte_t *pt = get_or_alloc_table(pd, pd_i);
@@ -458,13 +473,21 @@ static spinlock_t heap_lock = SPINLOCK_INIT;
 
 void heap_init(void) {
     kprintf("Heap init...\n");
-    const size_t pages = 256; /* 1 MB — must stay inside identity map */
+    /* Kernel heap must live inside the identity-mapped window so kmalloc
+     * returns directly usable addresses (no highmem mapping yet). */
+    const size_t pages = 256; /* 1 MB */
+    const uintptr_t ident_end = 0x40000000UL;
     void *mem = pmm_alloc_frames(pages);
-    if (!mem) { kprintf("Heap: no frames\n"); return; }
-    if ((uintptr_t)mem >= 0x40000000UL ||
-        (uintptr_t)mem + pages * PAGE_SIZE > 0x40000000UL) {
-        kprintf("Heap: frames %p outside identity map, refusing\n", mem);
+    if (!mem) {
+        kprintf("Heap: no frames\n");
+        return;
+    }
+    if ((uintptr_t)mem >= ident_end ||
+        (uintptr_t)mem + pages * PAGE_SIZE > ident_end) {
+        kprintf("Heap: frames %p outside identity map — free and fail closed\n",
+                mem);
         pmm_free_frames(mem, pages);
+        /* Fail closed: never leave a half-init heap that makes kmalloc hang. */
         return;
     }
 
@@ -477,7 +500,9 @@ void heap_init(void) {
     heap_free_bytes = heap_total - HDR_SIZE;
     heap_used = 0;
     spin_lock_init(&heap_lock);
-    kprintf("Heap at 0x%016x (%d KB)\n", (unsigned long long)(uintptr_t)heap_root, (uint32_t)(heap_total/1024));
+    kprintf("Heap at 0x%016x (%d KB)\n",
+            (unsigned long long)(uintptr_t)heap_root,
+            (uint32_t)(heap_total / 1024));
 }
 
 static size_t align_up(size_t n) {

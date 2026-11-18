@@ -1,4 +1,7 @@
-// interrupt.c
+/* interrupt.c — IDT, PIC, exception/IRQ dispatch (TigxOS 1.2.0) */
+
+
+
 #include "interrupt.h"
 #include "console.h"
 #include "io.h"
@@ -180,7 +183,7 @@ void panic_render(const char *reason, struct interrupt_frame *frame) {
 
     /* 1. Banner — centered */
     {
-        const char *banner = "*** TigxOS PANIC ***";
+        const char *banner = "*** TigxOS PANIC SCREEN ***";
         int len = (int)strlen(banner);
         int pad = (80 - len) / 2;
         if (pad < 0) pad = 0;

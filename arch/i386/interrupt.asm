@@ -1,5 +1,6 @@
-; arch/i386/interrupt.asm - 32-bit ISR + IRQ stubs
-; TigxOS V1.0.58
+; arch/i386/interrupt.asm — 32-bit ISR + IRQ stubs (TigxOS 1.2.0)
+; pusha + segment pushes give a fixed frame; we align ESP to 16 before the
+; C call so the SysV i386 ABI (and any SSE spill) is satisfied.
 [bits 32]
 
 section .text
@@ -49,9 +50,13 @@ isr_common_stub:
     mov fs, ax
     mov gs, ax
 
-    push esp                     ; pointer to interrupt_frame
+    mov eax, esp                 ; frame pointer
+    and esp, 0xFFFFFFF0          ; 16-byte align for C call
+    sub esp, 12                  ; + push below → 16-aligned after call push
+    push eax                     ; arg0 = interrupt_frame *
     call isr_handler
-    add esp, 4
+    pop eax                      ; discard arg
+    mov esp, eax                 ; restore real frame ESP
 
     pop gs
     pop fs
@@ -74,9 +79,13 @@ irq_common_stub:
     mov fs, ax
     mov gs, ax
 
-    push esp
+    mov eax, esp
+    and esp, 0xFFFFFFF0
+    sub esp, 12
+    push eax
     call irq_handler
-    add esp, 4
+    pop eax
+    mov esp, eax
 
     pop gs
     pop fs
@@ -135,7 +144,6 @@ IRQ 12, 44
 IRQ 13, 45
 IRQ 14, 46
 IRQ 15, 47
-
 
 ; === Syscall stub (int 0x80 from ring 3) ===
 syscall_stub:

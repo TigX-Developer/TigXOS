@@ -1,4 +1,6 @@
-// sync.h - Mutex and semaphore for TigxOS V1.0.58
+
+
+// sync.h - Mutex and semaphore for TigxOS 1.1.12
 #ifndef SYNC_H
 #define SYNC_H
 

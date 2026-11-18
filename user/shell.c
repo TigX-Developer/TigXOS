@@ -1,4 +1,4 @@
-/* shell.c — interactive shell for TigxOS V1.1.6 */
+/* shell.c — interactive shell for TigxOS 1.1.12 */
 
 #include "libc.h"
 #include "version.h"
@@ -6,7 +6,7 @@
 #define LINE_MAX 256
 #define MAX_ARGS 32
 #define ARGS_SLOTS (MAX_ARGS + 1)  /* room for NULL terminator */
-#define HIST_MAX 16
+#define HIST_MAX 32
 
 /* Must match kernel keyboard.h special codes */
 #define KEY_LEFT   ((char)0x80)
@@ -206,6 +206,254 @@ static void redraw_from(const char *buf, int len, int pos) {
  * Line editor: left/right/home/end, backspace/delete, mid-line insert,
  * up/down history. Returns length; buf is NUL-terminated.
  */
+
+/* ---- Aliases (1.1.10) ---- */
+#define MAX_ALIASES 16
+#define ALIAS_NAME  24
+#define ALIAS_VAL   96
+static struct {
+    int  used;
+    char name[ALIAS_NAME];
+    char value[ALIAS_VAL];
+} aliases[MAX_ALIASES];
+
+static int alias_set(const char *name, const char *value) {
+    if (!name || !name[0] || !value) return -1;
+    int i, free_i = -1;
+    for (i = 0; i < MAX_ALIASES; i++) {
+        if (aliases[i].used && strcmp(aliases[i].name, name) == 0) {
+            int j = 0;
+            while (value[j] && j < ALIAS_VAL - 1) {
+                aliases[i].value[j] = value[j];
+                j++;
+            }
+            aliases[i].value[j] = 0;
+            return 0;
+        }
+        if (!aliases[i].used && free_i < 0)
+            free_i = i;
+    }
+    if (free_i < 0) return -1;
+    i = free_i;
+    aliases[i].used = 1;
+    int j = 0;
+    while (name[j] && j < ALIAS_NAME - 1) {
+        aliases[i].name[j] = name[j];
+        j++;
+    }
+    aliases[i].name[j] = 0;
+    j = 0;
+    while (value[j] && j < ALIAS_VAL - 1) {
+        aliases[i].value[j] = value[j];
+        j++;
+    }
+    aliases[i].value[j] = 0;
+    return 0;
+}
+
+static const char *alias_get(const char *name) {
+    if (!name) return 0;
+    for (int i = 0; i < MAX_ALIASES; i++)
+        if (aliases[i].used && strcmp(aliases[i].name, name) == 0)
+            return aliases[i].value;
+    return 0;
+}
+
+static int alias_unset(const char *name) {
+    for (int i = 0; i < MAX_ALIASES; i++) {
+        if (aliases[i].used && strcmp(aliases[i].name, name) == 0) {
+            aliases[i].used = 0;
+            aliases[i].name[0] = 0;
+            aliases[i].value[0] = 0;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static void alias_list(void) {
+    int any = 0;
+    for (int i = 0; i < MAX_ALIASES; i++) {
+        if (!aliases[i].used) continue;
+        any = 1;
+        shell_puts("alias ");
+        shell_puts(aliases[i].name);
+        shell_puts("='");
+        shell_puts(aliases[i].value);
+        shell_puts("'\n");
+    }
+    if (!any)
+        shell_puts("alias: none\n");
+}
+
+static void cmd_history(void) {
+    if (hist_count == 0) {
+        shell_puts("history: empty\n");
+        return;
+    }
+    for (int i = 0; i < hist_count; i++) {
+        const char *h = hist_get(i);
+        printf("%5d  %s\n", i + 1, h ? h : "");
+    }
+}
+
+/* Collect command-name matches for tab completion into out[0..*nout). */
+static void collect_matches(const char *prefix, char out[][28], int *nout, int max) {
+    int plen = 0;
+    while (prefix[plen]) plen++;
+    *nout = 0;
+    /* builtins + shell keywords worth completing */
+    static const char *builtins[] = {
+        "help", "exit", "quit", "halt", "shutdown", "poweroff",
+        "pid", "true", "false", "set", "export", "unset", "env",
+        "cd", "pwd", "sh", "jobs", "fg", "wait", "kill",
+        "test", "alias", "unalias", "history",
+        "ps", "top", "date", "uptime", "uname", "free", "df", "sysinfo",
+        "edit", "clear", "echo", "cat", "ls", "rm", "cp", "mv",
+        "touch", "head", "wc", "sleep", "loop", "hello",
+        0
+    };
+    for (int i = 0; builtins[i] && *nout < max; i++) {
+        const char *b = builtins[i];
+        int j = 0;
+        while (j < plen && b[j] && b[j] == prefix[j]) j++;
+        if (j == plen) {
+            int k = 0;
+            while (b[k] && k < 27) { out[*nout][k] = b[k]; k++; }
+            out[*nout][k] = 0;
+            (*nout)++;
+        }
+    }
+    /* aliases */
+    for (int i = 0; i < MAX_ALIASES && *nout < max; i++) {
+        if (!aliases[i].used) continue;
+        const char *b = aliases[i].name;
+        int j = 0;
+        while (j < plen && b[j] && b[j] == prefix[j]) j++;
+        if (j == plen) {
+            int k = 0;
+            while (b[k] && k < 27) { out[*nout][k] = b[k]; k++; }
+            out[*nout][k] = 0;
+            (*nout)++;
+        }
+    }
+    /* TigFS names: prefer bin/NAME.elf → NAME */
+    char dentbuf[1024];
+    int n = getdents(dentbuf, sizeof(dentbuf));
+    if (n > 0) {
+        int off = 0;
+        while (off + (int)sizeof(struct dirent) <= n && *nout < max) {
+            struct dirent *d = (struct dirent *)(dentbuf + off);
+            off += (int)sizeof(struct dirent);
+            const char *nm = d->name;
+            /* strip leading bin/ */
+            if (nm[0] == 'b' && nm[1] == 'i' && nm[2] == 'n' && nm[3] == '/')
+                nm += 4;
+            /* strip trailing .elf */
+            char base[28];
+            int k = 0;
+            while (nm[k] && k < 27) { base[k] = nm[k]; k++; }
+            base[k] = 0;
+            if (k > 4 && base[k-4] == '.' && base[k-3] == 'e' &&
+                base[k-2] == 'l' && base[k-1] == 'f')
+                base[k-4] = 0;
+            /* match prefix */
+            int j = 0;
+            while (j < plen && base[j] && base[j] == prefix[j]) j++;
+            if (j != plen || !base[0])
+                continue;
+            /* dedup */
+            int dup = 0;
+            for (int m = 0; m < *nout; m++)
+                if (strcmp(out[m], base) == 0) { dup = 1; break; }
+            if (dup) continue;
+            k = 0;
+            while (base[k] && k < 27) { out[*nout][k] = base[k]; k++; }
+            out[*nout][k] = 0;
+            (*nout)++;
+        }
+    }
+}
+
+static void tab_complete(char *buf, int *len, int *pos, int max) {
+    /* Complete the word under/before cursor (simple: last word in buf[0..pos]) */
+    int start = *pos;
+    while (start > 0 && buf[start - 1] != ' ' && buf[start - 1] != '\t')
+        start--;
+    char prefix[LINE_MAX];
+    int plen = 0;
+    for (int i = start; i < *pos && plen + 1 < (int)sizeof(prefix); i++)
+        prefix[plen++] = buf[i];
+    prefix[plen] = 0;
+
+    char matches[96][28];
+    int nmatch = 0;
+    collect_matches(prefix, matches, &nmatch, 96);
+    if (nmatch == 0) {
+        /* bell */
+        write(STDOUT_FILENO, "\a", 1);
+        return;
+    }
+    /* longest common prefix among matches */
+    int lcp = 0;
+    for (;;) {
+        char ch = matches[0][lcp];
+        if (!ch) break;
+        int ok = 1;
+        for (int i = 1; i < nmatch; i++) {
+            if (matches[i][lcp] != ch) { ok = 0; break; }
+        }
+        if (!ok) break;
+        lcp++;
+    }
+    /* insert extension past current prefix */
+    if (lcp > plen) {
+        for (int i = plen; i < lcp; i++) {
+            char ch = matches[0][i];
+            if (*len + 1 >= max) break;
+            /* shift tail right */
+            for (int j = *len; j > *pos; j--)
+                buf[j] = buf[j - 1];
+            buf[*pos] = ch;
+            (*len)++;
+            (*pos)++;
+            write(STDOUT_FILENO, &ch, 1);
+        }
+        buf[*len] = 0;
+        /* redraw tail after cursor */
+        if (*pos < *len)
+            redraw_from(buf, *len, *pos);
+    }
+    if (nmatch > 1 && lcp <= plen) {
+        /* list matches */
+        write(STDOUT_FILENO, "\n", 1);
+        for (int i = 0; i < nmatch; i++) {
+            shell_puts(matches[i]);
+            shell_puts("  ");
+        }
+        shell_puts("\n");
+        prompt();
+        if (*len > 0)
+            write(STDOUT_FILENO, buf, *len);
+        /* cursor at end after list — move to *pos */
+        for (int i = *len; i > *pos; i--)
+            write(STDOUT_FILENO, "\b", 1);
+    } else if (nmatch == 1) {
+        /* append trailing space if completing a full single match */
+        if (lcp >= plen && matches[0][lcp] == 0 && *len + 1 < max &&
+            (*pos == 0 || buf[*pos - 1] != ' ')) {
+            for (int j = *len; j > *pos; j--)
+                buf[j] = buf[j - 1];
+            buf[*pos] = ' ';
+            (*len)++;
+            (*pos)++;
+            buf[*len] = 0;
+            write(STDOUT_FILENO, " ", 1);
+        }
+    }
+}
+
+
 static int readline(char *buf, int max) {
     int len = 0;
     int pos = 0;
@@ -266,6 +514,10 @@ static int readline(char *buf, int max) {
                 buf[len] = 0;
                 redraw_from(buf, len, pos);
             }
+            continue;
+        }
+        if (c == '\t') {
+            tab_complete(buf, &len, &pos, max);
             continue;
         }
         if (c == KEY_UP) {
@@ -722,24 +974,28 @@ static int tokenize(const char *line, char **argv, int max) {
 }
 
 static void cmd_help(void) {
-    shell_puts("Built-ins: help/?  exit/quit [N]  pid  true  false\n");
+    shell_puts("Built-ins: help/?  exit/quit [N]  halt/shutdown  pid  true  false\n");
     shell_puts("           set NAME=value | set NAME value | set\n");
     shell_puts("           export NAME[=value]  unset NAME  env\n");
     shell_puts("           (exported vars reach child programs via getenv)\n");
-    shell_puts("           cd [DIR]  pwd  sh FILE  jobs  fg [N]  wait [PID]  kill PID\n");
+    shell_puts("           cd [DIR]  pwd  sh FILE  jobs  fg [N]  wait [PID]  kill [-sig] PID\n");
     shell_puts("Lists:     cmd ; cmd   cmd && cmd   cmd || cmd   cmd &\n");
     shell_puts("Jobs:      cmd &   jobs   fg [job|pid]   wait [pid]\n");
-    shell_puts("Signals:   Ctrl-C kills foreground job (SIGINT)\n");
+    shell_puts("Signals:   Ctrl-C → SIGINT foreground job;  kill [-sig] PID\n");
+    shell_puts("Procs:     ps   top [N]   kill [-sig] PID\n");
     shell_puts("Redir:     cmd > file   cmd >> file   cmd < file\n");
     shell_puts("Pipe:      cmd1 | cmd2   (concurrent, real pipes)\n");
-    shell_puts("Edit:      arrows  Home/End  Del  Bksp  Up/Down history\n");
+    shell_puts("Edit:      arrows  Home/End  Del  Bksp  Up/Down history  Tab complete\n");
+    shell_puts("Alias:     alias [name[=value]]   unalias name   history\n");
+    shell_puts("Startup:   shell.rc / /shell.rc / bin/shell.rc (if present)\n");
     shell_puts("Scripts:   # comment   sh FILE\n");
     shell_puts("Flow:      if C ; then B ; [else B ;] fi\n");
     shell_puts("           while C ; do B ; done\n");
     shell_puts("Test:      test EXPR   [ EXPR ]   ($? / && / ||)\n");
     shell_puts("Programs:  hello echo loop args cat rm ls wc writefile\n");
     shell_puts("           lang65 exitn cp mv touch head clear tee sleep\n");
-    shell_puts("           basename dirname\n");
+    shell_puts("           basename dirname edit\n");
+    shell_puts("           date uptime uname free df sysinfo\n");
     shell_puts("Paths:     relative use cwd; absolute start with / ; PATH=bin:.\n");
     shell_puts("Layout:    programs live as bin/NAME.elf (PATH search finds them)\n");
 }
@@ -802,7 +1058,7 @@ static int try_spawn_one(const char *name, char **argv, char **envp) {
 }
 
 /*
- * PATH search (v1.1.6): if name contains no '/', walk PATH components.
+ * PATH search (v1.1.8): if name contains no '/', walk PATH components.
  * Default PATH is "bin:." (set at shell start if unset).
  * Each component is joined with '/' + name (and name.elf).
  */
@@ -816,7 +1072,7 @@ static int try_spawn(const char *name, char **argv) {
         return try_spawn_one(name, argv, envp);
 
     /*
-     * PATH search only (v1.1.6 fix): do NOT try cwd first unless "." is in PATH.
+     * PATH search only (v1.1.8 fix): do NOT try cwd first unless "." is in PATH.
      * Components are tried in order. Over-long components are skipped (consumed).
      */
     /* NULL = unset → default; empty string = explicitly empty (no search). */
@@ -1368,10 +1624,14 @@ static int try_builtin(char **argv, int argc, char *out_path, int append,
     int is_pwd = (strcmp(cmd, "pwd") == 0);
     int is_test = (strcmp(cmd, "test") == 0 ||
                    (cmd[0] == '[' && cmd[1] == 0));
+    int is_alias = (strcmp(cmd, "alias") == 0);
+    int is_unalias = (strcmp(cmd, "unalias") == 0);
+    int is_history = (strcmp(cmd, "history") == 0);
 
     if (!is_help && !is_pid && !is_true && !is_false &&
         !is_set && !is_export && !is_env && !is_unset && !is_jobs && !is_kill &&
-        !is_wait && !is_fg && !is_cd && !is_pwd && !is_test)
+        !is_wait && !is_fg && !is_cd && !is_pwd && !is_test &&
+        !is_alias && !is_unalias && !is_history)
         return 0;
 
     int saved_out = -1, saved_in = -1;
@@ -1393,6 +1653,70 @@ static int try_builtin(char **argv, int argc, char *out_path, int append,
         *status = 0;
     } else if (is_false) {
         *status = 1;
+    } else if (is_alias) {
+        if (argc == 1) {
+            alias_list();
+            *status = 0;
+        } else if (argc == 2) {
+            /* alias name=value  OR  alias name (show) */
+            const char *a = argv[1];
+            const char *eq = 0;
+            for (const char *p = a; *p; p++)
+                if (*p == '=') { eq = p; break; }
+            if (eq) {
+                char nm[ALIAS_NAME];
+                int i = 0;
+                while (a < eq && i < ALIAS_NAME - 1) nm[i++] = *a++;
+                nm[i] = 0;
+                if (!nm[0] || alias_set(nm, eq + 1) != 0) {
+                    shell_puts("alias: failed\n");
+                    *status = 1;
+                } else
+                    *status = 0;
+            } else {
+                const char *v = alias_get(a);
+                if (!v) {
+                    shell_puts("alias: not found\n");
+                    *status = 1;
+                } else {
+                    shell_puts("alias ");
+                    shell_puts(a);
+                    shell_puts("='");
+                    shell_puts(v);
+                    shell_puts("'\n");
+                    *status = 0;
+                }
+            }
+        } else if (argc >= 3) {
+            /* alias name value... (join with spaces) */
+            char val[ALIAS_VAL];
+            int p = 0;
+            for (int ai = 2; ai < argc && p < ALIAS_VAL - 1; ai++) {
+                if (ai > 2 && p < ALIAS_VAL - 1) val[p++] = ' ';
+                const char *s = argv[ai];
+                while (*s && p < ALIAS_VAL - 1) val[p++] = *s++;
+            }
+            val[p] = 0;
+            if (alias_set(argv[1], val) != 0) {
+                shell_puts("alias: failed\n");
+                *status = 1;
+            } else
+                *status = 0;
+        } else {
+            *status = 1;
+        }
+    } else if (is_unalias) {
+        if (argc < 2) {
+            shell_puts("unalias: usage: unalias NAME\n");
+            *status = 1;
+        } else if (alias_unset(argv[1]) != 0) {
+            shell_puts("unalias: not found\n");
+            *status = 1;
+        } else
+            *status = 0;
+    } else if (is_history) {
+        cmd_history();
+        *status = 0;
     } else if (is_test) {
         *status = cmd_test(argc, argv);
     } else if (is_set) {
@@ -1413,22 +1737,39 @@ static int try_builtin(char **argv, int argc, char *out_path, int append,
         cmd_jobs();
         *status = 0;
     } else if (is_kill) {
+        /* kill [-sig] PID  — default SIGKILL (9) */
+        int sig = 9;
+        int argi = 1;
         if (argc < 2) {
-            shell_puts("kill: usage: kill PID\n");
+            shell_puts("kill: usage: kill [-sig] PID\n");
             *status = 1;
         } else {
-            int pid = 0;
-            const char *s = argv[1];
-            while (*s >= '0' && *s <= '9') {
-                pid = pid * 10 + (*s - '0');
-                s++;
+            if (argv[1][0] == '-' && argv[1][1] >= '0' && argv[1][1] <= '9') {
+                const char *s = argv[1] + 1;
+                sig = 0;
+                while (*s >= '0' && *s <= '9') {
+                    sig = sig * 10 + (*s - '0');
+                    s++;
+                }
+                argi = 2;
             }
-            if (pid <= 0 || kill(pid) != 0) {
-                shell_puts("kill: failed\n");
+            if (argi >= argc) {
+                shell_puts("kill: usage: kill [-sig] PID\n");
                 *status = 1;
             } else {
-                jobs_remove(pid);
-                *status = 0;
+                int pid = 0;
+                const char *s = argv[argi];
+                while (*s >= '0' && *s <= '9') {
+                    pid = pid * 10 + (*s - '0');
+                    s++;
+                }
+                if (pid <= 0 || kill_sig(pid, sig) != 0) {
+                    shell_puts("kill: failed\n");
+                    *status = 1;
+                } else {
+                    jobs_remove(pid);
+                    *status = 0;
+                }
             }
         }
     } else if (is_wait) {
@@ -1619,16 +1960,14 @@ static int run_one(char **argv, int argc, int background) {
     /* Control structures (not backgrounded) */
     if (strcmp(argv[0], "if") == 0) {
         if (background) {
-            shell_puts("if: cannot background
-");
+            shell_puts("if: cannot background\n");
             return 1;
         }
         return run_if(argv, argc);
     }
     if (strcmp(argv[0], "while") == 0) {
         if (background) {
-            shell_puts("while: cannot background
-");
+            shell_puts("while: cannot background\n");
             return 1;
         }
         return run_while(argv, argc);
@@ -1656,6 +1995,17 @@ static int run_one(char **argv, int argc, int background) {
         return 1;
     }
 
+    if (strcmp(argv[0], "halt") == 0 || strcmp(argv[0], "shutdown") == 0 ||
+        strcmp(argv[0], "poweroff") == 0) {
+        if (background) {
+            shell_puts("halt: cannot background\n");
+            return 1;
+        }
+        shell_puts("Halting...\n");
+        halt();
+        return 0; /* not reached */
+    }
+
     if (strcmp(argv[0], "exit") == 0 || strcmp(argv[0], "quit") == 0) {
         if (background) {
             shell_puts("exit: cannot background\n");
@@ -1663,6 +2013,7 @@ static int run_one(char **argv, int argc, int background) {
         }
         int code = parse_exit_code(ac, argv);
         shell_puts("bye\n");
+        shell_puts("(shell will respawn; use 'halt' to stop the OS)\n");
         exit(code);
     }
 
@@ -1771,26 +2122,47 @@ int cmd_sh_file(const char *path) {
         return 1;
     }
     /*
-     * Read whole script (cap 4K). Newlines become ';' so multi-line
-     * if/while forms work:  if true\nthen\necho y\nfi
+     * Read whole script (cap 4K). Strip # comments per line first, then
+     * join with ';' so multi-line if/while forms work and a comment on
+     * one line cannot cut off later lines.
      */
     #define SH_FILE_MAX 4096
     static char buf[SH_FILE_MAX];
+    static char linebuf[LINE_MAX];
     int n = 0;
+    int li = 0;
     for (;;) {
         char c;
         long r = read(fd, &c, 1);
-        if (r <= 0)
+        if (r <= 0) {
+            /* flush last partial line */
+            if (li > 0) {
+                linebuf[li] = 0;
+                strip_comments(linebuf);
+                int k = 0;
+                while (linebuf[k] && n + 1 < SH_FILE_MAX)
+                    buf[n++] = linebuf[k++];
+            }
             break;
-        if (n + 1 >= SH_FILE_MAX) {
-            shell_puts("sh: script too long\n");
-            close(fd);
-            return 1;
         }
-        if (c == '\n' || c == '\r')
-            buf[n++] = ';';
-        else
-            buf[n++] = c;
+        if (c == '\n' || c == '\r') {
+            linebuf[li] = 0;
+            strip_comments(linebuf);
+            int k = 0;
+            while (linebuf[k] && n + 1 < SH_FILE_MAX)
+                buf[n++] = linebuf[k++];
+            if (n + 1 >= SH_FILE_MAX) {
+                shell_puts("sh: script too long\n");
+                close(fd);
+                return 1;
+            }
+            if (n > 0 && buf[n - 1] != ';')
+                buf[n++] = ';';
+            li = 0;
+            continue;
+        }
+        if (li + 1 < LINE_MAX)
+            linebuf[li++] = c;
     }
     close(fd);
     buf[n] = 0;
@@ -1816,6 +2188,26 @@ static int execute_line(char *line) {
     if (argc2 == 0)
         return last_status;
     args[argc2] = 0;
+    /* One-level alias expansion on argv[0] */
+    if (args[0]) {
+        const char *av = alias_get(args[0]);
+        if (av) {
+            static char alias_line[LINE_MAX];
+            int p = 0;
+            while (av[p] && p < LINE_MAX - 1) {
+                alias_line[p] = av[p];
+                p++;
+            }
+            /* append original args 1.. */
+            for (int i = 1; i < argc2 && p < LINE_MAX - 1; i++) {
+                alias_line[p++] = ' ';
+                const char *s = args[i];
+                while (*s && p < LINE_MAX - 1) alias_line[p++] = *s++;
+            }
+            alias_line[p] = 0;
+            return execute_line(alias_line);
+        }
+    }
     last_status = run_list(args, argc2);
     return last_status;
 }
@@ -1825,9 +2217,22 @@ int main(int argc, char **argv) {
     (void)argv;
     char line[LINE_MAX];
 
-    /* Standard layout (v1.1.6): programs live under bin/ ; PATH defaults to bin:. */
+    /* Standard layout (v1.1.8): programs live under bin/ ; PATH defaults to bin:. */
     if (!var_get("PATH"))
         var_set("PATH", "bin:.", 1);
+
+    /* Startup rc (first hit wins): shell.rc, /shell.rc, bin/shell.rc */
+    {
+        static const char *rcs[] = { "shell.rc", "/shell.rc", "bin/shell.rc", 0 };
+        for (int i = 0; rcs[i]; i++) {
+            int fd = open(rcs[i], O_RDONLY);
+            if (fd >= 0) {
+                close(fd);
+                cmd_sh_file(rcs[i]);
+                break;
+            }
+        }
+    }
 
     shell_puts("TigxOS shell " TIGX_VERSION "\n");
     shell_puts("Type help for commands.\n");
@@ -1837,11 +2242,15 @@ int main(int argc, char **argv) {
         prompt();
         int n = readline(line, LINE_MAX);
         if (n < 0) {
-            sleep_ms(50); /* avoid busy-loop if read fails */
+            /* hard read error — brief pause, retry */
+            sleep_ms(50);
             continue;
         }
-        if (n == 0)
-            continue;
+        if (n == 0) {
+            /* EOF on stdin: exit cleanly instead of spinning */
+            shell_puts("\n");
+            return 0;
+        }
         hist_add(line);
         execute_line(line);
     }

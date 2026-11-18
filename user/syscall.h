@@ -22,7 +22,11 @@
 #define SYS_SETFG      17
 #define SYS_BRK        18   /* new_brk → previous brk or (uintptr_t)-1 */
 #define SYS_CHDIR      19   /* path → 0 or -1 */
-#define SYS_GETCWD     20   /* buf, size → 0 or -1 */
+#define SYS_GETCWD     20
+#define SYS_SYSINFO    21   /* buf, size → 0 or -1 */
+#define SYS_PSINFO     22
+#define SYS_MKDIR      24
+#define SYS_HALT       23   /* power off / hang cleanly */
 
 #define O_RDONLY        0
 #define O_WRONLY        1

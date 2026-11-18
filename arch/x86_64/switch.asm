@@ -1,5 +1,5 @@
 ; arch/x86_64/switch.asm - context switch + trampolines
-; TigxOS V1.0.58 — ring 0 / ring 3
+; TigxOS 1.1.12 — ring 0 / ring 3
 [bits 64]
 [default rel]
 section .text

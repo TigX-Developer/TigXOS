@@ -1,4 +1,4 @@
-/* user/libc.c — minimal libc for ring-3 programs (V1.0.65) */
+/* user/libc.c — minimal libc for ring-3 programs (1.1.12) */
 #include "libc.h"
 #include <stdarg.h>
 
@@ -48,6 +48,19 @@ int getcwd(char *buf, size_t size) {
     return (int)syscall(SYS_GETCWD, (long)buf, (long)size, 0);
 }
 
+int sysinfo(struct sys_sysinfo *info) {
+    return (int)syscall(SYS_SYSINFO, (long)info, 0, 0);
+}
+
+int psinfo(struct sys_psinfo *info) {
+    return (int)syscall(SYS_PSINFO, (long)info, 0, 0);
+}
+
+void halt(void) {
+    (void)syscall(SYS_HALT, 0, 0, 0);
+    for (;;) ;
+}
+
 int close(int fd) {
     return (int)syscall(SYS_CLOSE, fd, 0, 0);
 }
@@ -82,6 +95,10 @@ int getdents(void *buf, size_t n) {
 
 int unlink(const char *path) {
     return (int)syscall(SYS_UNLINK, (long)path, 0, 0);
+}
+
+int mkdir(const char *path) {
+    return (int)syscall(SYS_MKDIR, (long)path, 0, 0);
 }
 
 int stat(const char *path, struct stat *st) {
@@ -179,27 +196,33 @@ int puts(const char *s) {
     return 0;
 }
 
-static int print_uint(unsigned long v, int base) {
+/* Print an unsigned number with optional width, zero-pad and left-justify. */
+static int print_num(unsigned long v, int base, int width, int zero, int left) {
     char buf[24];
     int i = 0, n = 0;
-    if (v == 0) { putchar('0'); return 1; }
+    if (v == 0) buf[i++] = '0';
     while (v) {
         int d = (int)(v % (unsigned)base);
         buf[i++] = (char)(d < 10 ? '0' + d : 'a' + d - 10);
         v /= (unsigned)base;
     }
-    n = i;
-    while (i--)
-        putchar(buf[i]);
+    int pad = width > i ? width - i : 0;
+    if (!left)
+        while (pad-- > 0) { putchar(zero ? '0' : ' '); n++; }
+    else
+        pad = pad > 0 ? pad : 0;
+    while (i--) { putchar(buf[i]); n++; }
+    if (left)
+        while (pad-- > 0) { putchar(' '); n++; }
     return n;
 }
 
-static int print_int(long v) {
+static int print_sint(long v, int width, int zero, int left) {
     if (v < 0) {
         putchar('-');
-        return 1 + print_uint(-(unsigned long)v, 10);
+        return 1 + print_num(-(unsigned long)v, 10, width > 1 ? width - 1 : 0, zero, left);
     }
-    return print_uint((unsigned long)v, 10);
+    return print_num((unsigned long)v, 10, width, zero, left);
 }
 
 int printf(const char *fmt, ...) {
@@ -214,38 +237,54 @@ int printf(const char *fmt, ...) {
         }
         fmt++;
         if (!*fmt) break;
+
+        /* flags: '-' left-justify, '0' zero-pad */
+        int left = 0, zero = 0, width = 0, is_long = 0;
+        for (;; fmt++) {
+            if (*fmt == '-') left = 1;
+            else if (*fmt == '0') zero = 1;
+            else break;
+        }
+        /* width */
+        while (*fmt >= '0' && *fmt <= '9') {
+            width = width * 10 + (*fmt - '0');
+            fmt++;
+        }
+        /* length modifier */
+        if (*fmt == 'l') { is_long = 1; fmt++; }
+        if (!*fmt) break;
+        if (left) zero = 0;
+
         switch (*fmt) {
         case 's': {
             const char *s = va_arg(ap, const char *);
             if (!s) s = "(null)";
-            size_t len = strlen(s);
-            write(STDOUT_FILENO, s, len);
-            n += (int)len;
+            int len = (int)strlen(s);
+            int pad = width > len ? width - len : 0;
+            if (!left) while (pad-- > 0) { putchar(' '); n++; }
+            write(STDOUT_FILENO, s, (size_t)len);
+            n += len;
+            if (left) while (pad-- > 0) { putchar(' '); n++; }
             break;
         }
-        case 'd': n += print_int(va_arg(ap, int)); break;
-        case 'i': n += print_int(va_arg(ap, int)); break;
-        case 'u': n += print_uint(va_arg(ap, unsigned), 10); break;
-        case 'x': case 'X': n += print_uint(va_arg(ap, unsigned), 16); break;
-        case 'p': {
+        case 'd': case 'i':
+            n += print_sint(is_long ? va_arg(ap, long) : (long)va_arg(ap, int),
+                            width, zero, left);
+            break;
+        case 'u':
+            n += print_num(is_long ? va_arg(ap, unsigned long)
+                                   : (unsigned long)va_arg(ap, unsigned),
+                           10, width, zero, left);
+            break;
+        case 'x': case 'X':
+            n += print_num(is_long ? va_arg(ap, unsigned long)
+                                   : (unsigned long)va_arg(ap, unsigned),
+                           16, width, zero, left);
+            break;
+        case 'p':
             putchar('0'); putchar('x');
-            n += 2 + print_uint((unsigned long)va_arg(ap, void *), 16);
+            n += 2 + print_num((unsigned long)va_arg(ap, void *), 16, 0, 0, 0);
             break;
-        }
-        case 'l': {
-            fmt++;
-            if (*fmt == 'd' || *fmt == 'i')
-                n += print_int((int)va_arg(ap, long));
-            else if (*fmt == 'u')
-                n += print_uint((unsigned long)va_arg(ap, unsigned long), 10);
-            else if (*fmt == 'x')
-                n += print_uint((unsigned long)va_arg(ap, unsigned long), 16);
-            else {
-                putchar('%'); putchar('l');
-                if (*fmt) { putchar(*fmt); n += 3; } else n += 2;
-            }
-            break;
-        }
         case 'c': putchar(va_arg(ap, int)); n++; break;
         case '%': putchar('%'); n++; break;
         default:  putchar('%'); putchar(*fmt); n += 2; break;

@@ -1,7 +1,8 @@
-/* aspace.c — Address Spaces II (1.0.76)
+/* aspace.c — Address Spaces (TigxOS 1.2.0)
  * Full teardown of intermediate tables, mapped user stacks with guard page,
  * permission flags (RO text, NX data on x86_64).
  */
+
 #include "aspace.h"
 #include "console.h"
 #include "string.h"
@@ -77,12 +78,18 @@ void aspace_destroy(struct address_space *as) {
 
 static pte_t *i386_get_pt(struct address_space *as, pte_t *pd, int pde_i) {
     if (pd[pde_i] & PAGE_HUGE) {
+        /* Split 4 MB PSE page into a page table without losing mappings.
+         * Identity phys base = pde_i * 4MB; replicate each 4 KB entry. */
         void *ptf = pmm_alloc_frame();
         if (!ptf) return NULL;
-        memset(ptf, 0, PAGE_SIZE);
+        pte_t *pt = (pte_t *)ptf;
+        uint32_t base = (uint32_t)pde_i << 22;
+        uint32_t flags = (pd[pde_i] & (PAGE_PRESENT | PAGE_WRITE | PAGE_USER));
+        for (int i = 0; i < 1024; i++)
+            pt[i] = (base + (uint32_t)i * PAGE_SIZE) | flags;
         if (track_table(as, ptf) != 0) { pmm_free_frame(ptf); return NULL; }
         pd[pde_i] = ((uint32_t)ptf) | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
-        return (pte_t *)ptf;
+        return pt;
     }
     if (!(pd[pde_i] & PAGE_PRESENT)) {
         void *ptf = pmm_alloc_frame();
@@ -204,10 +211,15 @@ int aspace_map(struct address_space *as, uintptr_t virt, uintptr_t phys,
     pte_t *pd = x64_get_or_alloc(as, pdpt, i3, 1);
     if (!pd) return -1;
     if (pd[i2] & PAGE_HUGE) {
-        /* Split huge page on private PD (COW above ensures pd is ours). */
+        /* Split 2 MB page into a PT without losing existing identity maps.
+         * Phys base of the huge page is bits 51:21 of the PDE. */
         void *ptf = pmm_alloc_frame();
         if (!ptf) return -1;
-        memset(ptf, 0, PAGE_SIZE);
+        pte_t *npt = (pte_t *)ptf;
+        uint64_t base = pd[i2] & ~0x1FFFFFULL; /* 2 MB aligned phys */
+        uint64_t fl = pd[i2] & (PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
+        for (int k = 0; k < 512; k++)
+            npt[k] = (base + (uint64_t)k * PAGE_SIZE) | fl;
         if (track_table(as, ptf) != 0) { pmm_free_frame(ptf); return -1; }
         pd[i2] = ((uint64_t)ptf) | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
     }

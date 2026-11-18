@@ -1,4 +1,7 @@
 /* gdt.h — kernel GDT + TSS (ring 0 / ring 3) */
+
+
+
 #ifndef GDT_H
 #define GDT_H
 

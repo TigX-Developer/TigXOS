@@ -3,11 +3,13 @@
 #
 #   make / make ARCH=x86_64 | make ARCH=i386
 #   make run-32 / run-64
+#   make test          # both arches, full boot-time suites
+#   make TESTS=1 run   # interactive with tests enabled
 
 ASM=nasm
 GLC=python3 lizard/glc.py
 VERSION := $(shell sed -n 's/.*TIGX_VERSION "\(.*\)"/\1/p' version.h)
-GL_PROGS = hello echo loop cat rm ls wc writefile lang65 exitn cp mv touch head clear tee sleep basename dirname typed
+GL_PROGS = hello echo loop cat rm ls wc writefile lang65 exitn cp mv touch head clear tee sleep basename dirname typed arrdemo strlib importdemo
 GL_ELFS  = $(GL_PROGS:%=user/%.gl.elf)
 CC=gcc
 LD=ld
@@ -24,21 +26,22 @@ ifneq ($(shell cat $(ARCH_STAMP) 2>/dev/null),$(ARCH))
 endif
 
 
-KERNEL_OBJS=entry.o interrupt.o switch.o console.o interrupt_c.o keyboard.o timer.o \
-	memory.o string.o process.o filetable.o disk.o fs.o spinlock.o wait.o sync.o font.o font_data.o \
+KERNEL_OBJS=entry.o interrupt.o switch.o console.o interrupt_c.o keyboard.o timer.o rtc.o \
+	memory.o string.o process.o filetable.o disk.o fs.o vfs.o ramfs.o spinlock.o wait.o sync.o font.o font_data.o \
 	gdt.o syscall.o pipe.o aspace.o elf.o embed_hello.o test.o tests.o kernel.o
 
 # Only the shell is still embedded in the kernel image (init). All other
 # user programs live on the TigFS image produced by tools/mktigfs.py.
 # 256 sectors ≈ 128 KB — comfortable headroom for shell + kernel code.
-KERNEL_SECTS=288
+KERNEL_SECTS=320
 KERNEL_MAX_BYTES=$(shell echo $$(( $(KERNEL_SECTS) * 512 )))
 TIGFS_OFFSET=$$((512 * 512))   # LBA 512 in bytes
 
 
 ifeq ($(ARCH),i386)
   CFLAGS=-ffreestanding -fno-pie -fno-stack-protector -m32 -nostdlib -I. -Wall -Wextra -MMD -MP
-  USER_CFLAGS=-ffreestanding -fno-pie -fno-stack-protector -m32 -nostdlib -static -Wall -I. -Iuser -MMD -MP
+  USER_CFLAGS=-ffreestanding -fno-pie -fno-stack-protector -m32 -nostdlib -static -Wall -Os \
+    -fno-asynchronous-unwind-tables -fno-exceptions -I. -Iuser -MMD -MP
   USER_LD=user/user32.ld
   SHELL_LD=user/shell32.ld
   LIBGCC=$(shell $(CC) -m32 -print-libgcc-file-name)
@@ -49,7 +52,8 @@ ifeq ($(ARCH),i386)
 else
   ARCH=x86_64
   CFLAGS=-ffreestanding -fno-pie -fno-stack-protector -m64 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib -I. -Wall -Wextra -MMD -MP
-  USER_CFLAGS=-ffreestanding -fno-pie -fno-stack-protector -m64 -nostdlib -static -Wall -I. -Iuser -MMD -MP
+  USER_CFLAGS=-ffreestanding -fno-pie -fno-stack-protector -m64 -nostdlib -static -Wall -Os \
+    -fno-asynchronous-unwind-tables -fno-exceptions -I. -Iuser -MMD -MP
   USER_LD=user/user64.ld
   SHELL_LD=user/shell64.ld
   LDFLAGS=-m elf_x86_64 -T linker.ld -nostdlib
@@ -97,6 +101,17 @@ user/args.o: user/args.c user/libc.h
 user/args.elf: user/crt0.o user/libc.o user/args.o $(USER_LD)
 	$(CC) $(USER_CFLAGS) -T $(USER_LD) -o $@ user/crt0.o user/libc.o user/args.o
 
+# C userland utilities (1.1.7 editor + 1.1.8 system info)
+C_UTILS = edit date uptime uname free df sysinfo ps kill top
+C_UTILS_ELFS = $(C_UTILS:%=user/%.elf)
+
+user/%.o: user/%.c user/libc.h
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+
+user/%.elf: user/%.o user/crt0.o user/libc.o $(USER_LD)
+	$(CC) $(USER_CFLAGS) -T $(USER_LD) -o $@ user/crt0.o user/libc.o $<
+
+
 # core tools are green lizard (examples/*.gl) via GL_PROGS
 
 
@@ -115,13 +130,13 @@ embed_hello.o: embed_hello.c
 # Host-built TigFS image containing every user program (stripped).
 # Written into os-image.bin at LBA 512 so boot mounts a populated FS.
 # Standard layout (v1.1.3): user programs under bin/; shell + args also at root for compat.
-tigfs.img: $(GL_ELFS) user/shell.elf user/args.elf tools/mktigfs.py
+tigfs.img: $(GL_ELFS) user/shell.elf user/args.elf $(C_UTILS_ELFS) tools/mktigfs.py
 	python3 tools/mktigfs.py -o $@ --strip \
 	  $(foreach p,$(GL_PROGS),bin/$(p).elf:user/$(p).gl.elf) \
 	  shell.elf:user/shell.elf \
 	  bin/shell.elf:user/shell.elf \
 	  args.elf:user/args.elf \
-	  bin/args.elf:user/args.elf
+	  bin/args.elf:user/args.elf 	  $(foreach p,$(C_UTILS),bin/$(p).elf:user/$(p).elf)
 
 boot.bin: $(ARCH_DIR)/boot.asm
 	$(ASM) -f bin $< -o $@
@@ -185,7 +200,8 @@ test-qemu-32:
 test-qemu-64:
 	$(MAKE) ARCH=x86_64 TESTS=1 test-qemu
 
-# One-command release gate: both arches, full test suites
+# Foundations freeze gate (v1.1.12+): both arches, full test suites
+# See FOUNDATIONS.md — expect 84 checks PASS on i386 and x86_64
 test: test-qemu-32 test-qemu-64
 	@echo "=== both arches green ==="
 

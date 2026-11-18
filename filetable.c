@@ -1,8 +1,10 @@
-/* filetable.c — shared open-file table with refcounts */
+/* filetable.c — shared open-file table with refcounts (TigxOS 1.1.12) */
+
 #include "filetable.h"
 #include "pipe.h"
 #include "string.h"
 #include "console.h"
+#include "spinlock.h"
 #include <stddef.h>
 
 static struct open_file oftab[MAX_OPEN_FILES];
@@ -14,14 +16,18 @@ void filetable_init(void) {
         oftab[i].type = OF_NONE;
         oftab[i].deferred_unlink = 0;
         oftab[i].pipe_id = -1;
+            oftab[i].ino = -1;
+            oftab[i].fsid = 0;
         oftab[i].name[0] = 0;
+        oftab[i].ino = -1;
+        oftab[i].fsid = 0;
     }
     kprintf("Filetable: %d open-file slots (shared offset + refcount)\n",
             MAX_OPEN_FILES);
 }
 
 int of_alloc(void) {
-    __asm__ volatile("cli");
+    unsigned long flags = irq_save();
     int id = -1;
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         if (!oftab[i].used) {
@@ -32,35 +38,37 @@ int of_alloc(void) {
             oftab[i].offset = 0;
             oftab[i].name[0] = 0;
             oftab[i].pipe_id = -1;
+            oftab[i].ino = -1;
+            oftab[i].fsid = 0;
             oftab[i].deferred_unlink = 0;
             id = i;
             break;
         }
     }
-    __asm__ volatile("sti");
+    irq_restore(flags);
     return id;
 }
 
 void of_incref(int id) {
     if (id < 0 || id >= MAX_OPEN_FILES)
         return;
-    __asm__ volatile("cli");
+    unsigned long flags = irq_save();
     if (oftab[id].used)
         oftab[id].refs++;
-    __asm__ volatile("sti");
+    irq_restore(flags);
 }
 
 void of_decref(int id) {
     if (id < 0 || id >= MAX_OPEN_FILES)
         return;
-    __asm__ volatile("cli");
+    unsigned long flags = irq_save();
     if (!oftab[id].used || oftab[id].refs <= 0) {
-        __asm__ volatile("sti");
+        irq_restore(flags);
         return;
     }
     oftab[id].refs--;
     if (oftab[id].refs > 0) {
-        __asm__ volatile("sti");
+        irq_restore(flags);
         return;
     }
     /* Last reference */
@@ -68,7 +76,7 @@ void of_decref(int id) {
     /* Never destroy the shared console object — keep a zombie slot. */
     if (o->type == OF_CONSOLE) {
         o->refs = 1; /* pin permanently */
-        __asm__ volatile("sti");
+        irq_restore(flags);
         return;
     }
     if (o->type == OF_PIPE && o->pipe_id >= 0) {
@@ -88,7 +96,7 @@ void of_decref(int id) {
     o->name[0] = 0;
     o->pipe_id = -1;
     o->deferred_unlink = 0;
-    __asm__ volatile("sti");
+    irq_restore(flags);
 }
 
 struct open_file *of_get(int id) {
@@ -103,7 +111,7 @@ int of_mark_unlink(const char *name) {
     if (!name || !name[0])
         return 0;
     int any = 0;
-    __asm__ volatile("cli");
+    unsigned long flags = irq_save();
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         if (oftab[i].used && oftab[i].type == OF_FILE &&
             oftab[i].name[0] && strcmp(oftab[i].name, name) == 0) {
@@ -111,11 +119,10 @@ int of_mark_unlink(const char *name) {
             any = 1;
         }
     }
-    __asm__ volatile("sti");
+    irq_restore(flags);
     if (any) {
         extern int fs_detach_name(const char *name);
         fs_detach_name(name);
     }
     return any;
 }
-

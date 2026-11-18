@@ -1,5 +1,5 @@
 ; arch/i386/boot.asm - E820 + 1GB identity (PSE 4MB) + LBA load + CHS fallback
-; TigxOS V1.0.58 — 32-bit protected-mode boot path
+; TigxOS 1.1.12 — 32-bit protected-mode boot path
 [org 0x7c00]
 [bits 16]
 
@@ -7,7 +7,7 @@ KERNEL_OFFSET  equ 0x10000
 MEMMAP_COUNT   equ 0x9000
 MEMMAP_ENTRIES equ 0x9004
 MEMMAP_MAX     equ 64
-KERNEL_SECTS   equ 288
+KERNEL_SECTS   equ 320
 
 start:
     xor ax, ax

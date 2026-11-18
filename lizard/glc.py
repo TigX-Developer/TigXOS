@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-glc — Green Lizard 2 → C transpiler for TigxOS userland (V1.1.5)
+glc — Green Lizard 2 → C transpiler for TigxOS userland (1.2.0)
 
 Green Lizard 2 is a small *typed* C/Python mix:
   - braces { } for blocks (C)
@@ -11,6 +11,8 @@ Green Lizard 2 is a small *typed* C/Python mix:
   - builtins map to user/libc.h syscalls
   - strings: concat (+), index (s[i]), compare (== !=)
   - char literals 'x', break/continue, typed error messages
+  - arrays: let a: int[N]; a[i] = v; a[i]
+  - import "file.gl"; len/substr string helpers; clearer errors
 
 Usage:
   python3 lizard/glc.py hello.gl -o hello.c
@@ -55,13 +57,22 @@ TOKENS = [
     ("COMMA",   r","),
     ("SEMI",    r";"),
     ("COLON",   r":"),
+    ("DOT",     r"\."),
 ]
 
 MASTER = re.compile("|".join(f"(?P<{n}>{p})" for n, p in TOKENS))
 
+C_RESERVED = {
+    "auto", "break", "case", "char", "const", "continue", "default", "do",
+    "double", "else", "enum", "extern", "float", "for", "goto", "if",
+    "inline", "int", "long", "register", "restrict", "return", "short",
+    "signed", "sizeof", "static", "struct", "switch", "typedef", "union",
+    "unsigned", "void", "volatile", "while", "_Bool", "_Complex", "_Imaginary",
+}
+
 KEYWORDS = {
     "fn", "let", "if", "else", "while", "for", "return", "true", "false",
-    "int", "str", "bool", "void", "break", "continue", "as",
+    "int", "str", "bool", "void", "break", "continue", "as", "import",
 }
 
 @dataclass
@@ -174,6 +185,18 @@ class Name(Node):
     name: str = ""
 
 @dataclass
+class IndexAssign(Node):
+    base: Any = None
+    index: Any = None
+    expr: Any = None
+    line: int = 0
+
+@dataclass
+class ArrayLit(Node):
+    elems: List[Any] = field(default_factory=list)
+    line: int = 0
+
+@dataclass
 class Index(Node):
     """base[index] — argv[i] or str[i]"""
     base: Any = None
@@ -208,7 +231,12 @@ class Parser:
     def eat(self, kind: Optional[str] = None) -> Tok:
         t = self.cur()
         if kind and t.kind != kind:
-            raise SystemExit(f"line {t.line}: expected {kind}, got {t.kind} ({t.val!r})")
+            got = t.kind if t.kind != "EOF" else "end of file"
+            extra = f" ({t.val!r})" if t.val and t.kind not in ("EOF",) else ""
+            raise SystemExit(
+                f"line {t.line}: expected {kind}, got {got}{extra}\n"
+                f"  hint: check braces, brackets, and type annotations near this line"
+            )
         self.i += 1
         return t
 
@@ -225,16 +253,37 @@ class Parser:
         return Program(funcs=funcs, line=1)
 
     def _parse_type_name(self) -> str:
-        """Parse int | str | bool | void type keyword."""
+        """Parse int | str | bool | void, or int[N] fixed array."""
         if self.cur().kind in ("INT", "STR", "BOOL", "VOID"):
-            return self.eat().val
-        if self.cur().kind == "IDENT" and self.cur().val in ("int", "str", "bool", "void"):
-            return self.eat("IDENT").val
-        raise SystemExit(f"line {self.cur().line}: expected type (int, str, bool, void)")
+            base = self.eat().val
+        elif self.cur().kind == "IDENT" and self.cur().val in ("int", "str", "bool", "void"):
+            base = self.eat("IDENT").val
+        else:
+            raise SystemExit(
+                f"line {self.cur().line}: expected type (int, str, bool, void), "
+                f"got {self.cur().kind} ({self.cur().val!r})"
+            )
+        if self.match("LBRACK"):
+            if base != "int":
+                raise SystemExit(
+                    f"line {self.cur().line}: only int[N] fixed arrays are supported"
+                )
+            ntok = self.eat("NUMBER")
+            self.eat("RBRACK")
+            n = int(ntok.val)
+            if n <= 0 or n > 256:
+                raise SystemExit(f"line {ntok.line}: array size must be 1..256, got {n}")
+            return f"int[{n}]"
+        return base
 
     def parse_func(self) -> Func:
         t = self.eat("FN")
         name = self.eat("IDENT").val
+        if name in C_RESERVED:
+            raise SystemExit(
+                f"line {t.line}: '{name}' is a reserved C keyword — "
+                f"rename the function (e.g. '{name}_fn')"
+            )
         self.eat("LPAREN")
         params = []
         if self.cur().kind != "RPAREN":
@@ -335,18 +384,31 @@ class Parser:
             rhs = self.parse_expr()
             self.match("SEMI")
             return Assign(name=expr.name, expr=rhs, line=line)
+        if isinstance(expr, Index) and self.cur().kind == "EQ":
+            self.eat("EQ")
+            rhs = self.parse_expr()
+            self.match("SEMI")
+            return IndexAssign(base=expr.base, index=expr.index, expr=rhs, line=line)
         self.match("SEMI")
         return ExprStmt(expr=expr, line=line)
 
     def parse_let(self) -> Let:
         t = self.eat("LET")
         name = self.eat("IDENT").val
+        if name in C_RESERVED:
+            raise SystemExit(
+                f"line {t.line}: '{name}' is a reserved C keyword — rename the variable"
+            )
         ty = None
         if self.match("COLON"):
             ty = self._parse_type_name()
+        # let a: int[N]  — zero-filled, no initializer required
+        if ty and ty.startswith("int[") and self.cur().kind != "EQ":
+            n = int(ty[4:-1])
+            expr = ArrayLit(elems=[Number(value=0, line=t.line) for _ in range(n)], line=t.line)
+            return Let(name=name, expr=expr, ty=ty, line=t.line)
         self.eat("EQ")
         expr = self.parse_expr()
-        # trailing SEMI is optional and left for the caller (stmt or for-init)
         return Let(name=name, expr=expr, ty=ty, line=t.line)
 
     def parse_for(self) -> For:
@@ -458,12 +520,36 @@ class Parser:
 
     def parse_primary(self) -> Any:
         t = self.cur()
+        if t.kind == "LBRACK":
+            self.eat("LBRACK")
+            elems = []
+            line = t.line
+            if self.cur().kind != "RBRACK":
+                elems.append(self.parse_expr())
+                while self.match("COMMA"):
+                    elems.append(self.parse_expr())
+            self.eat("RBRACK")
+            return ArrayLit(elems=elems, line=line)
         if t.kind == "NUMBER":
             self.eat()
             return Number(value=int(t.val), line=t.line)
         if t.kind == "STRING":
             self.eat()
-            return String(value=bytes(t.val[1:-1], "utf-8").decode("unicode_escape"), line=t.line)
+            # Decode C-style escapes without mangling non-ASCII UTF-8
+            raw = t.val[1:-1]
+            out = []
+            i = 0
+            while i < len(raw):
+                if raw[i] == "\\" and i + 1 < len(raw):
+                    nxt = raw[i + 1]
+                    mapping = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\",
+                               '"': '"', "'": "'", "0": "\0"}
+                    out.append(mapping.get(nxt, nxt))
+                    i += 2
+                else:
+                    out.append(raw[i])
+                    i += 1
+            return String(value="".join(out), line=t.line)
         if t.kind == "CHAR":
             self.eat()
             raw = t.val[1:-1]
@@ -499,11 +585,6 @@ class Parser:
         raise SystemExit(f"line {t.line}: unexpected {t.kind} ({t.val!r})")
 
 # ---------- Codegen → C ----------
-BUILTINS = {
-    "print", "write", "exit", "getpid", "yield", "sleep",
-    "open", "close", "spawn", "wait", "len", "unlink", "stat",
-    "readch", "writech", "listdir",
-}
 
 class Codegen:
     def __init__(self):
@@ -527,8 +608,13 @@ class Codegen:
             return "const char *"
         if ty == "void":
             return "void"
-        # int and bool → long
+        # int, bool, int[N] elements → long
         return "long"
+
+    def array_len(self, ty: str) -> int:
+        if ty.startswith("int[") and ty.endswith("]"):
+            return int(ty[4:-1])
+        return 0
 
     def same_type(self, a: str, b: str) -> bool:
         # bool is compatible with int in weak mode only for comparisons result assign
@@ -640,27 +726,67 @@ class Codegen:
 
     def gen_stmt(self, s: Any):
         if isinstance(s, Let):
-            e, ty = self.gen_expr(s.expr)
-            if s.ty:
-                self.check_assignable(s, s.ty, ty, f"let {s.name}")
-                ty = s.ty
-            if s.name not in self.vars:
+            if s.ty and s.ty.startswith("int["):
+                n = self.array_len(s.ty)
+                if s.name in self.vars:
+                    self.err(s, f"array '{s.name}' already declared in this function")
                 self.vars.add(s.name)
-                self.vartype[s.name] = ty
-                ctype = self.ctype_of(ty)
-                self.emit(f"{ctype} {s.name} = {e};")
+                self.vartype[s.name] = s.ty
+                parts = []
+                if isinstance(s.expr, ArrayLit):
+                    if len(s.expr.elems) > n:
+                        self.err(s, f"array literal has {len(s.expr.elems)} elements, capacity is {n}")
+                    for el in s.expr.elems:
+                        ec, et = self.gen_expr(el)
+                        if et not in ("int", "bool"):
+                            self.err(s, "int array elements must be int or bool")
+                        parts.append(ec)
+                while len(parts) < n:
+                    parts.append("0")
+                self.emit(f"long {s.name}[{n}] = {{ {', '.join(parts)} }};")
             else:
-                # re-let in same scope → assignment; check type
-                prev = self.vartype.get(s.name, "int")
-                self.check_assignable(s, prev, ty, f"let {s.name}")
-                self.emit(f"{s.name} = {e};")
+                e, ty = self.gen_expr(s.expr)
+                if s.ty:
+                    self.check_assignable(s, s.ty, ty, f"let {s.name}")
+                    ty = s.ty
+                if s.name not in self.vars:
+                    self.vars.add(s.name)
+                    self.vartype[s.name] = ty
+                    ctype = self.ctype_of(ty)
+                    self.emit(f"{ctype} {s.name} = {e};")
+                else:
+                    prev = self.vartype.get(s.name, "int")
+                    self.check_assignable(s, prev, ty, f"let {s.name}")
+                    self.emit(f"{s.name} = {e};")
         elif isinstance(s, Assign):
             if s.name not in self.vartype and s.name not in self.vars:
                 self.err(s, f"undeclared variable '{s.name}' (use let)")
             e, ty = self.gen_expr(s.expr)
             dst = self.vartype.get(s.name, "int")
+            if isinstance(dst, str) and dst.startswith("int["):
+                self.err(s, f"cannot assign to whole array '{s.name}' — use index assignment")
             self.check_assignable(s, dst, ty, f"assignment to {s.name}")
             self.emit(f"{s.name} = {e};")
+        elif isinstance(s, IndexAssign):
+            if not isinstance(s.base, Name):
+                self.err(s, "only name[index] = expr is supported")
+            aname = s.base.name
+            aty = self.vartype.get(aname, "")
+            if not (isinstance(aty, str) and aty.startswith("int[")):
+                self.err(s, f"'{aname}' is not an int array (type is {aty or 'unknown'})")
+            ix, ixt = self.gen_expr(s.index)
+            if ixt not in ("int", "bool"):
+                self.err(s, "array index must be int")
+            e, ty = self.gen_expr(s.expr)
+            if ty not in ("int", "bool"):
+                self.err(s, "array element value must be int")
+            n = self.array_len(aty)
+            self.emit(
+                f"{{ int __gi = (int)({ix}); "
+                f"if (__gi < 0 || __gi >= {n}) {{ "
+                f"printf(\"index out of range\\n\"); exit(1); }} "
+                f"{aname}[__gi] = {e}; }}"
+            )
         elif isinstance(s, If):
             c, ct = self.gen_expr(s.cond)
             if ct == "str":
@@ -784,7 +910,7 @@ class Codegen:
             if e.name in _flags:
                 return _flags[e.name], "int"
             if e.name not in self.vartype and e.name not in self.vars:
-                self.err(e, f"undeclared name '{e.name}'")
+                self.err(e, f"undeclared name '{e.name}' (did you forget let?)")
             vt = self.vartype.get(e.name, "int")
             return e.name, vt
         if isinstance(e, Index):
@@ -793,10 +919,25 @@ class Codegen:
                 self.err(e, "index must be int")
             if isinstance(e.base, Name) and e.base.name == "argv":
                 return f"argv_get(argv, argc, (int)({idx}))", "str"
+            if isinstance(e.base, Name):
+                aty = self.vartype.get(e.base.name, "")
+                if isinstance(aty, str) and aty.startswith("int["):
+                    n = self.array_len(aty)
+                    return (
+                        f"({{ int __gi = (int)({idx}); "
+                        f"if (__gi < 0 || __gi >= {n}) {{ "
+                        f"printf(\"index out of range\\n\"); exit(1); }} "
+                        f"{e.base.name}[__gi]; }})",
+                        "int",
+                    )
             base, bty = self.gen_expr(e.base)
+            if isinstance(bty, str) and bty.startswith("int["):
+                return f"({base})[(int)({idx})]", "int"
             if bty != "str":
-                self.err(e, "only string or argv indexing is supported")
+                self.err(e, "indexing requires str, argv, or int[N] array")
             return f"str_index({base}, (int)({idx}))", "int"
+        if isinstance(e, ArrayLit):
+            self.err(e, "array literal only allowed in: let a: int[N] = [..]")
         if isinstance(e, Unary):
             a, at = self.gen_expr(e.expr)
             if e.op == "!":
@@ -924,10 +1065,29 @@ class Codegen:
             return "(listdir(), 0)", "int"
         if n == "len":
             if len(args) != 1:
-                self.err(c, "len(s)")
+                self.err(c, "len(s) — returns string length")
             if args[0][1] != "str":
-                self.err(c, "len: argument must be str")
+                self.err(c, f"len: argument must be str, got {args[0][1]}")
             return f"((long)strlen({args[0][0]}))", "int"
+        if n == "substr":
+            if len(args) != 3:
+                self.err(c, "substr(s, start, len) — slice a string")
+            if args[0][1] != "str":
+                self.err(c, f"substr: first arg must be str, got {args[0][1]}")
+            if args[1][1] not in ("int", "bool") or args[2][1] not in ("int", "bool"):
+                self.err(c, "substr: start and len must be int")
+            s, st, ln = args[0][0], args[1][0], args[2][0]
+            return (
+                "({ static char __sb[4][128]; static int __si; "
+                "int __k = (__si++ & 3); int __off = (int)(" + st + "); int __n = (int)(" + ln + "); "
+                "const char *__p = " + s + "; int __L = (int)strlen(__p); "
+                "if (__off < 0) __off = 0; if (__off > __L) __off = __L; "
+                "if (__n < 0) __n = 0; if (__n > 127) __n = 127; "
+                "if (__off + __n > __L) __n = __L - __off; "
+                "for (int __i = 0; __i < __n; __i++) __sb[__k][__i] = __p[__off + __i]; "
+                "__sb[__k][__n] = 0; (const char *)__sb[__k]; })",
+                "str",
+            )
 
         # user function with signature check
         if n in self.func_sigs:
@@ -946,6 +1106,40 @@ class Codegen:
 
 
 
+def resolve_imports(path: str, seen: Optional[set] = None) -> str:
+    """Expand top-level import \"file.gl\" lines (relative to the importer)."""
+    import os
+    if seen is None:
+        seen = set()
+    path = os.path.abspath(path)
+    if path in seen:
+        raise SystemExit(f"import cycle involving {path}")
+    seen.add(path)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+    except OSError as e:
+        raise SystemExit(f"cannot open {path}: {e}")
+    basedir = os.path.dirname(path)
+    out_lines = []
+    for line in src.splitlines(True):
+        stripped = line.strip()
+        if stripped.startswith("import "):
+            rest = stripped[len("import"):].strip()
+            if len(rest) >= 2 and rest[0] == '"' and rest[-1] == '"':
+                rel = rest[1:-1]
+                child = os.path.normpath(os.path.join(basedir, rel))
+                out_lines.append(f"// begin import {rel}\n")
+                out_lines.append(resolve_imports(child, seen))
+                if not out_lines[-1].endswith("\n"):
+                    out_lines.append("\n")
+                out_lines.append(f"// end import {rel}\n")
+                continue
+            raise SystemExit(f'{path}: use import "file.gl" (string path required)')
+        out_lines.append(line)
+    return "".join(out_lines)
+
+
 def compile_source(src: str) -> str:
     toks = lex(src)
     prog = Parser(toks).parse()
@@ -959,8 +1153,8 @@ def main():
     args = ap.parse_args()
     if args.input.endswith(".tig"):
         print("glc: warning: .tig is deprecated, rename to .gl", file=sys.stderr)
-    src = open(args.input, encoding="utf-8").read()
     try:
+        src = resolve_imports(args.input)
         c = compile_source(src)
     except SystemExit as e:
         print(f"glc: {e}", file=sys.stderr)

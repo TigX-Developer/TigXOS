@@ -1,5 +1,8 @@
-/* syscall.c — int 0x80 dispatcher V1.0.63 */
+
+
+/* syscall.c — int 0x80 dispatcher (TigxOS 1.1.12) */
 #include "syscall.h"
+#include "io.h"
 #include "interrupt.h"
 #include "console.h"
 #include "process.h"
@@ -7,10 +10,13 @@
 #include "timer.h"
 #include "keyboard.h"
 #include "fs.h"
+#include "vfs.h"
 #include "pipe.h"
 #include "aspace.h"
 #include "string.h"
 #include "memory.h"
+#include "rtc.h"
+#include "version.h"
 #include "arch/arch.h"
 #include <stdint.h>
 
@@ -151,7 +157,7 @@ static long sys_write(struct process *cur, long fd, uintptr_t buf, size_t len) {
         int acc = o->flags & 3;
         if (acc == O_RDONLY)
             return -1;
-        int sz = fs_size(o->name);
+        int sz = fs_ino_size(o->ino);
         if (sz < 0)
             sz = 0;
         if (o->flags & O_APPEND)
@@ -162,13 +168,13 @@ static long sys_write(struct process *cur, long fd, uintptr_t buf, size_t len) {
         if (end_off < o->offset)
             return -1;
         uint32_t final_len = end_off > (uint32_t)sz ? end_off : (uint32_t)sz;
-        if (final_len > TIGFS_MAX_FILE)
+        if (final_len > (uint32_t)TIGFS_DIRECT * 512u)
             return -1;
         char *tmp = kmalloc(final_len ? final_len : 1);
         if (!tmp)
             return -1;
         if (sz > 0) {
-            if (fs_read(o->name, tmp, (uint32_t)sz) != sz) {
+            if (vfs_read(o->fsid, o->ino, 0, tmp, (uint32_t)sz) != sz) {
                 kfree(tmp);
                 return -1;
             }
@@ -179,7 +185,7 @@ static long sys_write(struct process *cur, long fd, uintptr_t buf, size_t len) {
             kfree(tmp);
             return -1;
         }
-        if (fs_write(o->name, tmp, final_len) != 0) {
+        if (vfs_write_replace(o->fsid, o->ino, tmp, final_len) != 0) {
             kfree(tmp);
             return -1;
         }
@@ -225,19 +231,19 @@ static long sys_read(struct process *cur, long fd, uintptr_t buf, size_t len) {
         int acc = o->flags & 3;
         if (acc == O_WRONLY)
             return -1;
-        int sz = fs_size(o->name);
+        int sz = fs_ino_size(o->ino);
         if (sz < 0)
             return 0;
         if (o->offset >= (uint32_t)sz)
             return 0;
         uint32_t remain = (uint32_t)sz - o->offset;
         uint32_t take = remain < (uint32_t)len ? remain : (uint32_t)len;
-        if ((uint32_t)sz > TIGFS_MAX_FILE)
+        if ((uint32_t)sz > (uint32_t)TIGFS_DIRECT * 512u)
             return -1;
         char *tmp = kmalloc((uint32_t)sz ? (uint32_t)sz : 1);
         if (!tmp)
             return -1;
-        if (fs_read(o->name, tmp, (uint32_t)sz) != sz) {
+        if (vfs_read(o->fsid, o->ino, 0, tmp, (uint32_t)sz) != sz) {
             kfree(tmp);
             return -1;
         }
@@ -271,37 +277,24 @@ static long sys_open(struct process *cur, uintptr_t pathu, long flags) {
     char resolved[PATH_MAX];
     if (fs_resolve_path(cur->cwd, upath, resolved, sizeof(resolved)) != 0)
         return -1;
-    const char *name = resolved;
-    if (name[0] == '/' && name[1])
-        name++;
-    if (!name[0])
-        return -1; /* pure root not a file */
-    /* TigFS name limit */
-    {
-        size_t nlen = 0;
-        while (name[nlen])
-            nlen++;
-        if (nlen >= TIGFS_NAME_LEN)
-            return -1;
-    }
 
     int need_create = (flags & O_CREAT) != 0;
     int acc = flags & 3;
     if (acc > O_RDWR)
         return -1;
 
-    int sz = fs_size(name);
-    if (sz < 0) {
+    int ino = -1, fsid = 0;
+    if (vfs_open(resolved, (int)flags, &ino, &fsid) != 0) {
         if (!need_create)
             return -1;
-        if (fs_create(name) != 0)
+        if (vfs_create(resolved, 0) != 0)
             return -1;
-        sz = 0;
+        if (vfs_open(resolved, (int)flags, &ino, &fsid) != 0)
+            return -1;
     }
     if ((flags & O_TRUNC) && acc != O_RDONLY) {
-        if (fs_write(name, "", 0) != 0)
+        if (vfs_write_replace(fsid, ino, "", 0) != 0)
             return -1;
-        sz = 0;
     }
 
     int of = of_alloc();
@@ -314,9 +307,15 @@ static long sys_open(struct process *cur, uintptr_t pathu, long flags) {
     }
     o->type = OF_FILE;
     o->flags = (int)flags;
-    o->offset = (flags & O_APPEND) ? (uint32_t)sz : 0;
+    o->ino = ino;
+    o->fsid = fsid;
+    o->offset = 0;
+    if (flags & O_APPEND) {
+        int sz = fs_ino_size(ino);
+        o->offset = sz > 0 ? (uint32_t)sz : 0;
+    }
     memset(o->name, 0, sizeof(o->name));
-    strncpy(o->name, name, TIGFS_NAME_LEN - 1);
+    fs_ino_name(ino, o->name, sizeof(o->name));
 
     int fd = process_alloc_fd(cur);
     if (fd < 0) {
@@ -431,15 +430,16 @@ static long sys_pipe(struct process *cur, uintptr_t pipefdu) {
 
 
 static long sys_getdents(struct process *cur, uintptr_t buf, size_t len) {
-    (void)cur;
+    if (!cur || len == 0 || len > 4096)
+        return -1;
     if (!user_range_writable(buf, len))
         return -1;
-    if (len > 4096) len = 4096;
     char kbuf[4096];
-    int n = fs_getdents(kbuf, (uint32_t)len);
+    const char *path = (cur->cwd[0]) ? cur->cwd : "/";
+    int n = vfs_getdents(path, kbuf, (uint32_t)len);
     if (n < 0)
         return -1;
-    if (n > 0 && copy_to_user(buf, kbuf, (size_t)n) != 0)
+    if (copy_to_user(buf, kbuf, (size_t)n) != 0)
         return -1;
     return n;
 }
@@ -455,20 +455,11 @@ static long sys_unlink(struct process *cur, uintptr_t pathu) {
     char resolved[PATH_MAX];
     if (fs_resolve_path(cur->cwd, upath, resolved, sizeof(resolved)) != 0)
         return -1;
-    const char *name = resolved;
-    if (name[0] == '/' && name[1])
-        name++;
-    if (!name[0])
+    if (vfs_is_dir(resolved) == 1)
         return -1;
-    {
-        size_t nlen = 0;
-        while (name[nlen]) nlen++;
-        if (nlen >= TIGFS_NAME_LEN)
-            return -1;
-    }
-    if (of_mark_unlink(name))
-        return 0; /* stay until last close */
-    return fs_remove(name) == 0 ? 0 : -1;
+    if (of_mark_unlink(resolved))
+        return 0;
+    return vfs_unlink(resolved) == 0 ? 0 : -1;
 }
 
 static long sys_stat(struct process *cur, uintptr_t pathu, uintptr_t st_u) {
@@ -482,23 +473,12 @@ static long sys_stat(struct process *cur, uintptr_t pathu, uintptr_t st_u) {
     char resolved[PATH_MAX];
     if (fs_resolve_path(cur->cwd, upath, resolved, sizeof(resolved)) != 0)
         return -1;
-    const char *name = resolved;
-    if (name[0] == '/' && name[1])
-        name++;
-    if (!name[0])
-        return -1;
-    {
-        size_t nlen = 0;
-        while (name[nlen]) nlen++;
-        if (nlen >= TIGFS_NAME_LEN)
-            return -1;
-    }
-    int sz = fs_visible_size(name);
-    if (sz < 0)
+    struct vfs_stat vst;
+    if (vfs_stat(resolved, &vst) != 0)
         return -1;
     struct sys_stat st;
-    st.size = (uint32_t)sz;
-    st.mode = 1;
+    st.size = vst.size;
+    st.mode = vst.mode;
     if (copy_to_user(st_u, &st, sizeof(st)) != 0)
         return -1;
     return 0;
@@ -580,8 +560,16 @@ static long sys_kill(struct process *cur, long pid, long sig) {
     if (pid <= 0)
         return -1;
     int s = (int)sig;
+    /* signal 0: existence probe only (POSIX-style), do not deliver */
+    if (s == 0) {
+        struct process *p = process_lookup_pid((int)pid);
+        if (!p || p->state == PROC_UNUSED || p->state == PROC_DEAD)
+            return -1;
+        return 0;
+    }
+    /* only SIGINT(2), SIGKILL(9), SIGTERM(15) — unknown → error */
     if (s != 2 && s != 9 && s != 15)
-        s = 9;
+        return -1;
     return process_kill((int)pid, 128 + s);
 }
 
@@ -621,6 +609,19 @@ static long sys_brk(struct process *cur, uintptr_t new_brk) {
     return (long)old;
 }
 
+
+static long sys_mkdir(struct process *cur, uintptr_t pathu) {
+    if (!cur)
+        return -1;
+    char upath[PATH_MAX];
+    if (copy_user_path(upath, sizeof(upath), pathu) != 0)
+        return -1;
+    char resolved[PATH_MAX];
+    if (fs_resolve_path(cur->cwd, upath, resolved, sizeof(resolved)) != 0)
+        return -1;
+    return vfs_mkdir(resolved) == 0 ? 0 : -1;
+}
+
 static long sys_chdir(struct process *cur, uintptr_t pathu) {
     if (!cur)
         return -1;
@@ -630,8 +631,8 @@ static long sys_chdir(struct process *cur, uintptr_t pathu) {
     char resolved[PATH_MAX];
     if (fs_resolve_path(cur->cwd, upath, resolved, sizeof(resolved)) != 0)
         return -1;
-    /* For flat FS we accept any path string as cwd (no real dir check yet).
-     * Keep it absolute and within PATH_MAX. */
+    if (vfs_is_dir(resolved) != 1)
+        return -1;
     strncpy(cur->cwd, resolved, PATH_MAX - 1);
     cur->cwd[PATH_MAX - 1] = '\0';
     return 0;
@@ -650,6 +651,103 @@ static long sys_getcwd(struct process *cur, uintptr_t bufu, size_t size) {
     if (copy_to_user(bufu, cur->cwd, len + 1) != 0)
         return -1;
     return 0;
+}
+
+
+static long sys_sysinfo(struct process *cur, uintptr_t uaddr) {
+    (void)cur;
+    if (!user_range_writable(uaddr, sizeof(struct sys_sysinfo)))
+        return -1;
+    struct sys_sysinfo info;
+    memset(&info, 0, sizeof(info));
+    uint32_t hz = timer_get_hz();
+    if (!hz) hz = 100;
+    uint32_t ticks = timer_get_ticks();
+    info.ticks = ticks;
+    info.hz = hz;
+    info.uptime_sec = ticks / hz;
+    /* usable RAM, not the sum of every E820 region (that can include huge reserved holes) */
+    {
+        uint64_t usable = memory_get_usable();
+        uint64_t freeb  = memory_get_free();
+        /* PMM tracks frames only up to MAX_PHYS_ADDR; report a consistent view */
+        if (usable > MAX_PHYS_ADDR)
+            usable = MAX_PHYS_ADDR;
+        if (freeb > usable)
+            freeb = usable;
+        info.mem_total_kb = (uint32_t)(usable / 1024ull);
+        info.mem_free_kb  = (uint32_t)(freeb / 1024ull);
+    }
+    info.fs_files = (uint32_t)fs_count();
+    info.fs_blocks = fs_data_blocks();
+    info.fs_free_blocks = fs_free_blocks();
+    struct rtc_time rt;
+    if (rtc_read(&rt) == 0) {
+        info.rtc_year = rt.year;
+        info.rtc_mon  = rt.mon;
+        info.rtc_day  = rt.day;
+        info.rtc_hour = rt.hour;
+        info.rtc_min  = rt.min;
+        info.rtc_sec  = rt.sec;
+    }
+#if defined(__x86_64__)
+    const char *arch = "x86_64";
+#else
+    const char *arch = "i386";
+#endif
+    for (int i = 0; arch[i] && i < 15; i++)
+        info.arch[i] = arch[i];
+    const char *ver = TIGX_VERSION;
+    for (int i = 0; ver[i] && i < 23; i++)
+        info.version[i] = ver[i];
+    if (copy_to_user(uaddr, &info, sizeof(info)) != 0)
+        return -1;
+    return 0;
+}
+
+
+
+static long sys_psinfo(struct process *cur, uintptr_t uaddr) {
+    (void)cur;
+    if (!user_range_writable(uaddr, sizeof(struct sys_psinfo)))
+        return -1;
+    struct sys_psinfo info;
+    info.count = 0;
+    for (int i = 0; i < SYS_PSINFO_MAX; i++) {
+        info.procs[i].pid = 0;
+        info.procs[i].ppid = 0;
+        info.procs[i].state = 0;
+        info.procs[i].is_user = 0;
+        info.procs[i].exit_status = 0;
+        info.procs[i].name[0] = 0;
+    }
+    int n = process_snapshot(info.procs, SYS_PSINFO_MAX);
+    info.count = n;
+    if (copy_to_user(uaddr, &info, sizeof(info)) != 0)
+        return -1;
+    return n;
+}
+
+
+static long sys_halt(struct process *cur) {
+    /* Policy: only the shell may halt the machine (Foundations). */
+    if (!cur || !cur->is_user)
+        return -1;
+    if (strcmp(cur->name, "shell") != 0 && strcmp(cur->name, "shell.elf") != 0)
+        return -1;
+    process_request_halt();
+    kprintf("\nSystem halted.\n");
+    __asm__ volatile("cli");
+    /*
+     * isa-debug-exit: status = (code<<1)|1.
+     * code 0 → status 1 (tests treat as PASS) — do NOT use that here.
+     * code 2 → status 5 so a halt is not a green test run.
+     */
+    outb(0xf4, 0x02);
+    outw(0x604, 0x2000);
+    for (;;)
+        __asm__ volatile("hlt");
+    return 0; /* not reached */
 }
 
 static long sys_setfg(struct process *cur, long pid) {
@@ -671,17 +769,9 @@ static long sys_spawn(struct process *cur, uintptr_t pathu, uintptr_t argvu,
     char resolved[PATH_MAX];
     if (fs_resolve_path(cur->cwd, upath, resolved, sizeof(resolved)) != 0)
         return -1;
-    const char *name = resolved;
-    if (name[0] == '/' && name[1])
-        name++;
-    if (!name[0])
+    /* Hierarchical TigFS: keep absolute path for elf_load_file / fs_lookup. */
+    if (!resolved[0])
         return -1;
-    {
-        size_t nlen = 0;
-        while (name[nlen]) nlen++;
-        if (nlen >= TIGFS_NAME_LEN)
-            return -1;
-    }
 
     /* Serialize static staging buffers against concurrent spawn */
     __asm__ volatile("cli");
@@ -720,7 +810,7 @@ static long sys_spawn(struct process *cur, uintptr_t pathu, uintptr_t argvu,
         kenvp[0] = 0;
     }
 
-    int pid = spawn(name, argc > 0 ? kargv : NULL,
+    int pid = spawn(resolved, argc > 0 ? kargv : NULL,
                     envc > 0 ? kenvp : NULL);
     if (pid > 0 && cur)
         process_set_parent(process_lookup_pid(pid), cur->pid);
@@ -810,6 +900,18 @@ static void syscall_dispatch(struct interrupt_frame *frame) {
     case SYS_GETCWD:
         ret = (uint32_t)sys_getcwd(cur, (uintptr_t)a0, (size_t)a1);
         break;
+    case SYS_SYSINFO:
+        ret = (uint32_t)sys_sysinfo(cur, (uintptr_t)a0);
+        break;
+    case SYS_PSINFO:
+        ret = (uint32_t)sys_psinfo(cur, (uintptr_t)a0);
+        break;
+    case SYS_MKDIR:
+        ret = (uint32_t)sys_mkdir(cur, (uintptr_t)a0);
+        break;
+    case SYS_HALT:
+        ret = (uint32_t)sys_halt(cur);
+        break;
     default:
         kprintf("syscall: unknown %u\n", (unsigned)num);
         ret = (uint32_t)-1;
@@ -892,6 +994,18 @@ static void syscall_dispatch(struct interrupt_frame *frame) {
         break;
     case SYS_GETCWD:
         ret = (uint64_t)sys_getcwd(cur, (uintptr_t)a0, (size_t)a1);
+        break;
+    case SYS_SYSINFO:
+        ret = (uint64_t)sys_sysinfo(cur, (uintptr_t)a0);
+        break;
+    case SYS_PSINFO:
+        ret = (uint64_t)sys_psinfo(cur, (uintptr_t)a0);
+        break;
+    case SYS_MKDIR:
+        ret = (uint64_t)sys_mkdir(cur, (uintptr_t)a0);
+        break;
+    case SYS_HALT:
+        ret = (uint64_t)sys_halt(cur);
         break;
     default:
         kprintf("syscall: unknown %u\n", (unsigned)num);

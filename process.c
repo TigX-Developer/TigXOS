@@ -1,5 +1,7 @@
-// process.c - TigxOS V1.0.58 preemptive scheduler + blocking
-// Fixed: stable pid == table index, full slot reclaim, correct lookup
+/* process.c — preemptive scheduler, wait/kill, fg job, ps snapshot (TigxOS 1.2.0) */
+
+
+
 #include "process.h"
 #include "filetable.h"
 #include "memory.h"
@@ -691,6 +693,15 @@ static void process_finalize(struct process *p) {
  */
 static uint32_t last_shell_respawn_tick = 0;
 static int      shell_respawn_fail_streak = 0;
+static int      system_halt_requested = 0;
+
+void process_request_halt(void) {
+    system_halt_requested = 1;
+}
+
+int process_halt_requested(void) {
+    return system_halt_requested;
+}
 
 static void process_reap(void) {
     for (int i = 1; i < MAX_PROCESSES; i++) {
@@ -711,7 +722,7 @@ static void process_reap(void) {
                              strcmp(p->name, "shell.elf") == 0);
             process_finalize(p);
             /* Shell exit used to leave the system with only idle — respawn. */
-            if (was_shell) {
+            if (was_shell && !system_halt_requested) {
                 uint32_t now = timer_get_ticks();
                 /* ~2 s at 100 Hz; also stop after repeated failures */
                 if (shell_respawn_fail_streak >= 3) {
@@ -964,6 +975,34 @@ int process_count(void) {
     return n;
 }
 
+/* Snapshot live + zombie (DEAD, not yet reaped) processes for ps/top. */
+int process_snapshot(void *out_procs, int max) {
+    if (!out_procs || max <= 0)
+        return 0;
+    /* Layout matches struct sys_proc_info in syscall.h */
+    struct {
+        int32_t pid, ppid, state, is_user, exit_status;
+        char name[32];
+    } *out = out_procs;
+    int n = 0;
+    for (int i = 0; i < MAX_PROCESSES && n < max; i++) {
+        struct process *p = &process_table[i];
+        if (p->state == PROC_UNUSED)
+            continue;
+        out[n].pid = p->pid;
+        out[n].ppid = p->parent_pid;
+        out[n].state = (int32_t)p->state;
+        out[n].is_user = p->is_user;
+        out[n].exit_status = p->exit_status;
+        int j;
+        for (j = 0; j < 31 && p->name[j]; j++)
+            out[n].name[j] = p->name[j];
+        out[n].name[j] = 0;
+        n++;
+    }
+    return n;
+}
+
 void process_list(void) {
     kprintf("\nPID  STATE     NAME\n");
     for (int i = 0; i < MAX_PROCESSES; i++) {
@@ -1004,6 +1043,8 @@ static struct process *pick_next(void) {
     return &process_table[0];
 }
 
+/* schedule() requires IF=0 (caller cli). Returns with IF still 0.
+ * Idle (pid 0) is never blocked; pick_next falls back to it if nothing READY. */
 void schedule(void) {
     if (!scheduler_enabled || !current)
         return;

@@ -1,4 +1,6 @@
 // console.c - VGA text console + COM1 serial (IRQ-safe via spinlock)
+
+
 #include "console.h"
 #include "io.h"
 #include "spinlock.h"
@@ -31,6 +33,7 @@ static int cursor_x = 0, cursor_y = 0;
 static unsigned char color = 0x0F;
 static int cursor_visible = 1;
 static int serial_ready = 0;
+void serial_putchar(char c);  /* defined later; used by putchar_raw */
 
 /* Serializes VGA + kprintf against preemption / IRQ prints */
 static spinlock_t console_lock = SPINLOCK_INIT;
@@ -85,6 +88,10 @@ static void wrap_cursor(void) {
 
 /* Unlocked primitives — caller holds console_lock */
 static void putchar_raw(char c) {
+    /* Mirror every character to COM1 so headless (-serial stdio) runs see output. */
+    if (serial_ready)
+        serial_putchar(c);
+
     if (c == '\b') {
         /* Non-destructive: move cursor left only (VT-style).
          * Erase is the shell's job (\b + space + \b, or redraw_from). */

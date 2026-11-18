@@ -1,4 +1,6 @@
-// wait.c - Blocking wait queues for TigxOS V1.0.58
+
+
+// wait.c - Blocking wait queues for TigxOS 1.1.12
 #include "wait.h"
 #include "console.h"
 #include "string.h"

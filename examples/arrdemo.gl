@@ -1,0 +1,14 @@
+// arrdemo.gl — fixed int arrays (Green Lizard 1.1.11)
+fn main() {
+    let a: int[5] = [10, 20, 30, 40, 50]
+    let i: int = 0
+    let sum: int = 0
+    while i < 5 {
+        sum = sum + a[i]
+        i = i + 1
+    }
+    print("sum", sum)
+    a[0] = 7
+    print("a0", a[0])
+    exit(0)
+}

@@ -2,7 +2,7 @@
 
 **A dual-architecture hobby OS — thin kernel in C, userland in C and Green Lizard.**
 
-[![Version](https://img.shields.io/badge/version-1.1.6-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.2.1-blue)](CHANGELOG.md)
 [![Arch](https://img.shields.io/badge/arch-i386%20%7C%20x86__64-green)](#build)
 [![Lang](https://img.shields.io/badge/kernel-C-orange)](#languages)
 [![Lang](https://img.shields.io/badge/userland-C%20%2B%20Green%20Lizard-purple)](#languages)
@@ -57,22 +57,41 @@ examples/hello.gl  →  glc  →  hello.gl.c  →  gcc  →  bin/hello.elf  → 
 
 See **[lizard/README.md](lizard/README.md)** for syntax, `argc`/`argv`, and limits.
 
+### Current series — 1.2.x Kernel infrastructure
+
+| Version | Highlights |
+|---------|------------|
+| **1.2.0** | GDT/IDT, address-space, and memory audit fixes |
+| **1.2.1** | **VFS** + hierarchical **TigFS v6**, ramfs at `/tmp`, expanded tests |
+
+
 ---
 
-## Features (v1.1.6 — Foundations)
+## Features (v1.2.1 — VFS + TigFS directories + ramfs)
 
 - **Dual-arch kernel** — i386 protected mode & x86_64 long mode  
-- **Processes** — per-process address spaces, preemptive scheduling, wait/kill  
-- **Shell** — pipes, redirection, jobs, Ctrl-C, variables, `cd` / `pwd`  
-- **TigFS** — flat filesystem, path resolution, cwd, safe mount checks  
-- **Layout** — programs under `bin/`; default `PATH=bin:.`  
-- **Green Lizard** — native `.gl` programs on disk (`hello`, `ls`, `cat`, …)
-- **Tools Round 2** — `cp`, `mv`, `touch`, `head`, `clear`, `tee`, `sleep`, `basename`, `dirname`  
-- **C userland** — minimal libc (`open`, `spawn`, `malloc`/`brk`, …)
+- **Processes** — address spaces, preemptive scheduling, wait / kill / ps / top  
+- **Shell** — pipes, redirs, jobs, Ctrl-C, history, Tab complete, aliases, `shell.rc`, `halt`  
+- **TigFS** — flat filesystem, cwd, `PATH=bin:.`, programs as `bin/NAME.elf`  
+- **Green Lizard** — typed `.gl`, `int[N]` arrays, `import`, `len` / `substr`  
+- **System tools** — date, uptime, uname, free, df, sysinfo, edit, ps, kill, top  
+- **File tools** — ls, cat, cp, mv, rm, touch, head, tee, wc, …  
+- **Tests** — `make test` headless gate on **both arches** (84 checks)
 
-Shell reference: **[SHELL.md](SHELL.md)** · History: **[CHANGELOG.md](CHANGELOG.md)**
+**Foundations freeze:** **[FOUNDATIONS.md](FOUNDATIONS.md)** · Shell: **[SHELL.md](SHELL.md)** · History: **[CHANGELOG.md](CHANGELOG.md)**
 
 ---
+
+## Testing
+
+```bash
+make test              # i386 + x86_64 headless suites (release gate)
+make ARCH=x86_64 run   # interactive QEMU
+make size              # kernel / shell / image sizes
+```
+
+Both arches must print `ALL TESTS PASSED` and `=== both arches green ===`.
+See **[FOUNDATIONS.md](FOUNDATIONS.md)** for the freeze checklist.
 
 ## Requirements
 
@@ -134,7 +153,7 @@ bin/hello.elf ...
 ## Versioning
 
 - `version.h` is the only version source of truth  
-- Current series: **1.1.x — Shell & Foundations**  
+- Current series: **1.2.x — Kernel infrastructure** (at 1.2.1)  
 - Bug fixes usually stay in the same version; bumps are deliberate  
 
 Roadmap target: usable desktop-style OS by **2.0** (graphics, networking, apps).

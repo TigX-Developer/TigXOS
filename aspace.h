@@ -1,4 +1,6 @@
 /* aspace.h — per-process address spaces (TigxOS 1.0.76) */
+
+
 #ifndef ASPACE_H
 #define ASPACE_H
 
