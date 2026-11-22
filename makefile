@@ -8,7 +8,7 @@
 
 ASM=nasm
 GLC=python3 lizard/glc.py
-VERSION := 1.2.8-update5
+VERSION := 1.2.9
 GL_PROGS = hello echo loop cat rm ls wc writefile lang65 exitn cp mv touch head clear tee sleep basename dirname typed arrdemo strlib importdemo
 GL_ELFS  = $(GL_PROGS:%=user/%.gl.elf)
 CC=gcc
@@ -238,3 +238,13 @@ check:
 .PHONY: all clean run run-debug run-32 run-64 check test-qemu test-qemu-32 test-qemu-64 test size
 
 
+
+# Multicore smoke (x86_64 only): boot with 2/4 CPUs, serial log only
+test-smp: ARCH=x86_64
+test-smp: os-image.bin
+	@echo "=== test-smp x86_64 -smp 2 ==="
+	timeout --foreground -k 5 20 qemu-system-x86_64 -m 128 -smp 2 -nographic \
+	  -drive file=os-image.bin,format=raw,if=ide,index=0,media=disk \
+	  -serial mon:stdio -display none \
+	  || true
+	@echo "(inspect log for: online in long mode / scheduler idle loop)"

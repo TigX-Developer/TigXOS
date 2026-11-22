@@ -1,5 +1,68 @@
 # TigxOS changelog
 
+## 1.2.9-update3 — complete SMP completion path
+
+Honest close-out of the 1.2.9 roadmap item:
+
+### AP long mode + C (from update2)
+- Trampoline → long mode → `ap_main` in 64-bit C
+
+### Cross-core scheduling
+- `process_prepare_ap_idle` / `process_bind_ap` — per-AP idle in `process_table`
+- AP idle loop calls **`schedule()`** when the scheduler is enabled
+- Affinity + **steal** in `pick_next` (update1)
+
+### IPI
+- IDT gates for **0xFC (TLB)** and **0xFD (resched)** with asm stubs
+- Handlers call `smp_ipi_*_handler` + LAPIC EOI
+
+### TLB / balance
+- `smp_tlb_shootdown` + steal counters (existing)
+
+### Tests / tooling
+- Unused `r0` warning fixed
+- `make test-smp` — QEMU `-smp 2` smoke on x86_64
+
+### Limits that remain true
+- **i386** is UP (no LAPIC map)
+- `make test` stays on `-smp 1` for determinism; use `make test-smp` for AP bring-up
+- APs do not yet take IRQs from the legacy PIC (LAPIC timer on AP is future work)
+
+
+## 1.2.9-update2 — AP long-mode entry (APs run C)
+
+### SMP
+- **Trampoline** enters **long mode** on x86_64 (PAE + EFER.LME + paging) using the BSP identity PML4
+- **`ap_main`** runs in 64-bit C: enables per-AP state, logs online, idle `sti;hlt` loop
+- Per-AP **stacks** from PMM; boot block at `0x8F00` (cr3, entry, stack, cpu_id)
+- Mailbox + `ap_ready[]` handshake; BSP waits for C entry when possible
+
+### Fixes
+- Drop unused `r0` in smp tests (`-Wunused-variable` on i386)
+
+### Notes
+- `make test` still uses `-smp 1` (stable CI). To exercise APs: QEMU `-smp 2` or higher on x86_64
+- i386 remains UP
+- Cross-core **schedule()** on APs still deferred (idle loop only); steal/IPI paths remain on BSP
+
+
+## 1.2.9-update1 — scheduler steal, public README, version string fix
+
+### Scheduler
+- **Affinity-aware `pick_next`**: prefer READY tasks already on this CPU
+- **Work steal**: if the local CPU is idle of READY work, steal a READY task from another CPU and count it (`smp_note_steal` / `smp_balance_steals`)
+- Soft multicore stress checks in the smp test suite
+
+### Build / docs
+- **`makefile` `VERSION`** is **1.2.9** (image banner no longer says 1.2.8-update5)
+- **Public README** for GitHub visitors (clone, build, layout, license)
+- Test fix: drop always-true `uint64_t >= 0` check (i386 `-Wtype-limits`)
+
+### Still true
+- Application processors park after SIPI until long-mode AP entry lands
+- **i386** remains UP (LAPIC above identity map)
+
+
 ## 1.2.9 — SMP completion (IPI, TLB shootdown, balance hooks)
 
 Cross-core infrastructure on top of 1.2.8 AP bring-up.

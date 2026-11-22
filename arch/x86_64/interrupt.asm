@@ -205,3 +205,15 @@ irq_stub_table:
 %endrep
 
 section .note.GNU-stack noalloc noexec nowrite progbits
+
+; IPI vectors (1.2.9) — LAPIC fixed delivery, no error code
+global ipi_stub_tlb
+global ipi_stub_resched
+ipi_stub_tlb:
+    push 0
+    push 0xFC
+    jmp isr_common_stub
+ipi_stub_resched:
+    push 0
+    push 0xFD
+    jmp isr_common_stub

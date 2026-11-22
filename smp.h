@@ -36,6 +36,7 @@ void smp_ipi_tlb_handler(void);
 uint64_t smp_ipi_resched_count(void);
 uint64_t smp_ipi_tlb_count(void);
 uint64_t smp_balance_steals(void);
+void     smp_note_steal(void);
 int      smp_need_resched(void);
 void     smp_clear_need_resched(void);
 

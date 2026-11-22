@@ -320,6 +320,69 @@ int process_wait(int pid) {
     }
 }
 
+
+/* Reserve a process_table slot as the idle task for an application processor. */
+int process_prepare_ap_idle(int cpu_id) {
+    if (cpu_id <= 0 || cpu_id >= NCPU_MAX)
+        return -1;
+    struct process *p = NULL;
+    for (int i = 1; i < MAX_PROCESSES; i++) {
+        if (process_table[i].state == PROC_UNUSED ||
+            process_table[i].state == PROC_DEAD) {
+            p = &process_table[i];
+            break;
+        }
+    }
+    if (!p)
+        return -1;
+    memset(p, 0, sizeof(*p));
+    p->pid = (int)(p - process_table);
+    p->state = PROC_READY;
+    p->parent_pid = -1;
+    p->wait_pid = -1;
+    process_init_fds(p);
+    {
+        char nm[PROCESS_NAME_LEN];
+        nm[0] = 'i'; nm[1] = 'd'; nm[2] = 'l'; nm[3] = 'e'; nm[4] = '-';
+        nm[5] = (char)('0' + (cpu_id % 10));
+        nm[6] = 0;
+        strncpy(p->name, nm, PROCESS_NAME_LEN - 1);
+    }
+    p->is_user = 0;
+    p->priority = PRIO_IDLE;
+    p->time_slice = TIME_SLICE_TICKS;
+    p->on_cpu = cpu_id;
+    p->kernel_stack_top = 0; /* AP brings its own stack from smp */
+    strncpy(p->cwd, "/", PATH_MAX - 1);
+    cpus[cpu_id].id = cpu_id;
+    cpus[cpu_id].online = 0; /* becomes 1 in process_bind_ap */
+    cpus[cpu_id].cur = p;
+    return p->pid;
+}
+
+void process_bind_ap(int cpu_id) {
+    if (cpu_id <= 0 || cpu_id >= NCPU_MAX)
+        return;
+    cpus[cpu_id].online = 1;
+    cpus[cpu_id].id = cpu_id;
+    if (!cpus[cpu_id].cur) {
+        /* Fallback: any READY idle-named task on this cpu */
+        for (int i = 0; i < MAX_PROCESSES; i++) {
+            if (process_table[i].state != PROC_UNUSED &&
+                process_table[i].on_cpu == cpu_id) {
+                cpus[cpu_id].cur = &process_table[i];
+                break;
+            }
+        }
+    }
+    if (cpus[cpu_id].cur)
+        cpus[cpu_id].cur->state = PROC_RUNNING;
+    ncpu_online = 0;
+    for (int i = 0; i < NCPU_MAX; i++)
+        if (cpus[i].online)
+            ncpu_online++;
+}
+
 int process_create(const char *name, void (*entry)(void)) {
     struct process *p = NULL;
     int slot = -1;
@@ -1083,23 +1146,52 @@ void process_list(void) {
 
 /* Pick highest-priority READY task; RR within the same priority.
  * Caller must hold sched_lock (or IF=0 on uniprocessor). */
+static void balance_steals_local(void) {
+    /* smp.c exports smp_balance_steals as read-only; bump via note API */
+    extern void smp_note_steal(void);
+    smp_note_steal();
+}
+
 static struct process *pick_next(void) {
+    int self = smp_cpu_id();
+    if (self < 0 || self >= NCPU_MAX)
+        self = 0;
+
+    /* Pass 1: highest-priority READY preferred on this CPU (or unassigned). */
     for (int prio = PRIO_MAX; prio >= PRIO_MIN; prio--) {
         int start = rr_cursor[prio];
         for (int n = 0; n < MAX_PROCESSES; n++) {
             int i = (start + n) % MAX_PROCESSES;
             struct process *p = &process_table[i];
-            if (p->state == PROC_READY && p->priority == prio) {
+            if (p->state != PROC_READY || p->priority != prio)
+                continue;
+            if (p->on_cpu == self || p->on_cpu < 0 || smp_cpu_count() <= 1) {
                 rr_cursor[prio] = (i + 1) % MAX_PROCESSES;
+                p->on_cpu = self;
                 return p;
             }
         }
     }
+
+    /* Pass 2: steal a READY task from another CPU (load balance). */
+    for (int prio = PRIO_MAX; prio >= PRIO_MIN; prio--) {
+        for (int i = 0; i < MAX_PROCESSES; i++) {
+            struct process *p = &process_table[i];
+            if (p->state == PROC_READY && p->priority == prio &&
+                p->on_cpu != self && p->pid != 0) {
+                p->on_cpu = self;
+                balance_steals_local();
+                return p;
+            }
+        }
+    }
+
     /* Fallback: idle (pid 0). Force READY if somehow invalid. */
     if (process_table[0].state != PROC_READY &&
         process_table[0].state != PROC_RUNNING)
         process_table[0].state = PROC_READY;
     process_table[0].priority = PRIO_IDLE;
+    process_table[0].on_cpu = self;
     return &process_table[0];
 }
 

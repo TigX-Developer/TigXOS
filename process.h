@@ -65,6 +65,9 @@ struct process {
 };
 
 void process_init(void);
+int  process_prepare_ap_idle(int cpu_id); /* reserve idle slot for AP */
+void process_bind_ap(int cpu_id);         /* AP: set current + online */
+
 int  process_create(const char *name, void (*entry)(void));
 int  process_create_user(const char *name, void (*user_entry)(void));
 int  process_create_user_at(const char *name, uintptr_t entry, uintptr_t user_sp);

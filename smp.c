@@ -15,6 +15,7 @@
 #include "lapic.h"
 #include "log.h"
 #include "memory.h"
+#include "arch/arch.h"
 #include "process.h"
 #include "string.h"
 #include <stdint.h>
@@ -41,87 +42,198 @@ static volatile uint32_t  tlb_shoot_gen;
 static volatile uint32_t  tlb_ack_gen[NCPU_MAX];
 
 
-/* AP C entry — reserved for 1.2.9 when APs get a real stack + long mode. */
-static void __attribute__((unused)) ap_main(void) {
-    uint32_t aid = lapic_id();
-    int id = 0;
-    for (int i = 0; i < NCPU_MAX; i++) {
-        if (smp_logical[i] == (int)aid) {
-            id = i;
-            break;
+
+/* AP boot block at 0x8F00 (identity-mapped, below 1 MB). */
+#define AP_BOOT_PHYS     0x8F00
+struct ap_boot_info {
+    volatile uint32_t ready;   /* mailbox: incremented by trampoline */
+    uint32_t          _pad0;
+    uint64_t          cr3;     /* PML4 physical */
+    uint64_t          entry;   /* ap_main */
+    uint64_t          stack;   /* top of AP stack */
+    uint32_t          cpu_id;  /* logical id assigned by BSP */
+    uint32_t          _pad1;
+};
+#define AP_BOOT ((struct ap_boot_info *)(uintptr_t)AP_BOOT_PHYS)
+
+/* Per-AP stacks (16 KiB each), allocated once on first smp_init. */
+#define AP_STACK_SIZE  0x4000
+static uint8_t *ap_stacks[NCPU_MAX];
+
+#if defined(__x86_64__)
+/* 64-bit AP entry — runs after trampoline enters long mode. */
+static void ap_main(void) {
+    struct ap_boot_info *b = AP_BOOT;
+    int id = (int)b->cpu_id;
+    if (id < 0 || id >= NCPU_MAX)
+        id = 0;
+
+    if (lapic_present())
+        lapic_eoi();
+
+    process_bind_ap(id);
+    ap_ready[id] = 1;
+    /* smp_ap_ok counted once here */
+    {
+        static int counted[NCPU_MAX];
+        if (id < NCPU_MAX && !counted[id]) {
+            counted[id] = 1;
+            atomic_inc((volatile int *)&smp_ap_ok);
         }
     }
-    ap_ready[id] = 1;
-    pr_info("smp: CPU %d (APIC %u) online and parked\n", id, aid);
+
+    pr_info("smp: CPU %d (APIC %u) online — scheduler idle loop\n", id, lapic_id());
+
+    /* Cross-core scheduling: schedule() requires IF=0 (same as BSP). */
+    for (;;) {
+        __asm__ volatile("cli" ::: "memory");
+        if (smp_need_resched())
+            smp_clear_need_resched();
+        if (scheduler_is_enabled())
+            schedule();
+        __asm__ volatile("sti; hlt" ::: "memory");
+    }
+}
+#else
+static void ap_main(void) {
     for (;;)
         __asm__ volatile("hlt");
 }
+#endif
 
 /*
- * Minimal real-mode trampoline at 0x8000.
+ * Trampoline at 0x8000:
+ *  real mode → protected mode → long mode → call ap_main
+ *
  * Layout:
- *   [0x00]  16-bit entry (SIPI lands here, CS=0x800)
- *   [0x78]  GDTR
- *   [0x80]  GDT (null + code32 + data32)
- *   [0x100] 32-bit stub: set segments, lock-inc mailbox, hlt loop
+ *  [0x00]  16-bit SIPI entry
+ *  [0x60]  GDTR
+ *  [0x68]  GDT (null, code32, data32, code64, data64)
+ *  [0x100] 32-bit: segments, load CR3/PAE/LME/PG, far jump to 64-bit
+ *  [0x180] 64-bit: stack, call entry, hlt
  */
 static void install_trampoline(void) {
     uint8_t *t = (uint8_t *)(uintptr_t)TRAMPOLINE_PHYS;
     memset(t, 0, TRAMPOLINE_SIZE);
 
-    /* cli */
-    t[0x00] = 0xFA;
-    /* xor ax,ax ; mov ds,ax */
-    t[0x01] = 0x31; t[0x02] = 0xC0;
-    t[0x03] = 0x8E; t[0x04] = 0xD8;
-    /* lgdt [0x8078] */
-    t[0x05] = 0x0F; t[0x06] = 0x01; t[0x07] = 0x16;
-    t[0x08] = 0x78; t[0x09] = 0x80;
-    /* mov eax,cr0 ; or al,1 ; mov cr0,eax */
-    t[0x0A] = 0x0F; t[0x0B] = 0x20; t[0x0C] = 0xC0;
-    t[0x0D] = 0x0C; t[0x0E] = 0x01;
-    t[0x0F] = 0x0F; t[0x10] = 0x22; t[0x11] = 0xC0;
+    /* --- 16-bit entry --- */
+    int i = 0;
+    t[i++] = 0xFA;                         /* cli */
+    t[i++] = 0x31; t[i++] = 0xC0;         /* xor ax,ax */
+    t[i++] = 0x8E; t[i++] = 0xD8;         /* mov ds,ax */
+    /* lgdt [0x8060] */
+    t[i++] = 0x0F; t[i++] = 0x01; t[i++] = 0x16;
+    t[i++] = 0x60; t[i++] = 0x80;
+    /* mov eax,cr0; or al,1; mov cr0,eax */
+    t[i++] = 0x0F; t[i++] = 0x20; t[i++] = 0xC0;
+    t[i++] = 0x0C; t[i++] = 0x01;
+    t[i++] = 0x0F; t[i++] = 0x22; t[i++] = 0xC0;
     /* jmp far 0x08:0x8100 */
-    t[0x12] = 0x66; t[0x13] = 0xEA;
-    t[0x14] = 0x00; t[0x15] = 0x81; t[0x16] = 0x00; t[0x17] = 0x00;
-    t[0x18] = 0x08; t[0x19] = 0x00;
+    t[i++] = 0x66; t[i++] = 0xEA;
+    t[i++] = 0x00; t[i++] = 0x81; t[i++] = 0x00; t[i++] = 0x00;
+    t[i++] = 0x08; t[i++] = 0x00;
 
-    /* GDT at 0x8080 */
-    uint8_t *gdt = t + 0x80;
-    memset(gdt, 0, 8);
-    /* code32: base 0, limit 4 GB, type 0x9A, gran 0xCF */
-    gdt[8]  = 0xFF; gdt[9]  = 0xFF; gdt[10] = 0x00; gdt[11] = 0x00;
-    gdt[12] = 0x00; gdt[13] = 0x9A; gdt[14] = 0xCF; gdt[15] = 0x00;
-    /* data32: type 0x92 */
-    gdt[16] = 0xFF; gdt[17] = 0xFF; gdt[18] = 0x00; gdt[19] = 0x00;
-    gdt[20] = 0x00; gdt[21] = 0x92; gdt[22] = 0xCF; gdt[23] = 0x00;
+    /* --- GDT at 0x8068 --- */
+    uint8_t *gdt = t + 0x68;
+    memset(gdt, 0, 8); /* null */
+    /* 0x08 code32 */
+    gdt[8]=0xFF; gdt[9]=0xFF; gdt[10]=0; gdt[11]=0;
+    gdt[12]=0; gdt[13]=0x9A; gdt[14]=0xCF; gdt[15]=0;
+    /* 0x10 data32 */
+    gdt[16]=0xFF; gdt[17]=0xFF; gdt[18]=0; gdt[19]=0;
+    gdt[20]=0; gdt[21]=0x92; gdt[22]=0xCF; gdt[23]=0;
+    /* 0x18 code64: L=1 D=0, type 0x9A, gran 0xAF */
+    gdt[24]=0x00; gdt[25]=0x00; gdt[26]=0; gdt[27]=0;
+    gdt[28]=0; gdt[29]=0x9A; gdt[30]=0xA0; gdt[31]=0;
+    /* 0x20 data64 */
+    gdt[32]=0x00; gdt[33]=0x00; gdt[34]=0; gdt[35]=0;
+    gdt[36]=0; gdt[37]=0x92; gdt[38]=0xA0; gdt[39]=0;
 
-    /* GDTR at 0x8078 */
-    uint8_t *gdtr = t + 0x78;
-    gdtr[0] = 23; gdtr[1] = 0;
-    uint32_t gdt_phys = TRAMPOLINE_PHYS + 0x80;
+    /* GDTR at 0x8060 */
+    uint8_t *gdtr = t + 0x60;
+    gdtr[0] = 39; gdtr[1] = 0; /* limit */
+    uint32_t gdt_phys = TRAMPOLINE_PHYS + 0x68;
     gdtr[2] = (uint8_t)(gdt_phys);
     gdtr[3] = (uint8_t)(gdt_phys >> 8);
     gdtr[4] = (uint8_t)(gdt_phys >> 16);
     gdtr[5] = (uint8_t)(gdt_phys >> 24);
 
-    /* 32-bit stub at 0x8100 */
+    /* --- 32-bit stub at 0x8100 --- */
     uint8_t *p = t + 0x100;
-    int i = 0;
-    p[i++] = 0x66; p[i++] = 0xB8; p[i++] = 0x10; p[i++] = 0x00; /* mov ax,0x10 */
-    p[i++] = 0x8E; p[i++] = 0xD8; /* mov ds,ax */
-    p[i++] = 0x8E; p[i++] = 0xC0; /* mov es,ax */
-    p[i++] = 0x8E; p[i++] = 0xD0; /* mov ss,ax */
-    /* lock incl dword [0x8FF0] */
-    p[i++] = 0xF0; p[i++] = 0xFF; p[i++] = 0x05;
-    p[i++] = 0xF0; p[i++] = 0x8F; p[i++] = 0x00; p[i++] = 0x00;
-    /* sti ; hlt ; jmp $ */
-    p[i++] = 0xFB;
-    p[i++] = 0xF4;
-    p[i++] = 0xEB; p[i++] = 0xFD;
+    i = 0;
+    /* mov ax,0x10; mov ds/es/ss,ax */
+    p[i++]=0x66; p[i++]=0xB8; p[i++]=0x10; p[i++]=0x00;
+    p[i++]=0x8E; p[i++]=0xD8;
+    p[i++]=0x8E; p[i++]=0xC0;
+    p[i++]=0x8E; p[i++]=0xD0;
+
+    /* lock incl [0x8F00] (ready mailbox) */
+    p[i++]=0xF0; p[i++]=0xFF; p[i++]=0x05;
+    p[i++]=0x00; p[i++]=0x8F; p[i++]=0x00; p[i++]=0x00;
+
+#if defined(__x86_64__)
+    /* mov eax, [AP_BOOT.cr3] @ 0x8F08 */
+    p[i++]=0xA1;
+    p[i++]=0x08; p[i++]=0x8F; p[i++]=0x00; p[i++]=0x00;
+    /* mov cr3, eax */
+    p[i++]=0x0F; p[i++]=0x22; p[i++]=0xD8;
+
+    /* mov eax, cr4; or eax, 0x20; mov cr4, eax  (PAE) */
+    p[i++]=0x0F; p[i++]=0x20; p[i++]=0xE0;
+    p[i++]=0x83; p[i++]=0xC8; p[i++]=0x20;
+    p[i++]=0x0F; p[i++]=0x22; p[i++]=0xE0;
+
+    /* mov ecx, 0xC0000080; rdmsr; or eax, 0x100; wrmsr (LME) */
+    p[i++]=0xB9; p[i++]=0x80; p[i++]=0x00; p[i++]=0x00; p[i++]=0xC0;
+    p[i++]=0x0F; p[i++]=0x32;
+    p[i++]=0x0D; p[i++]=0x00; p[i++]=0x01; p[i++]=0x00; p[i++]=0x00;
+    p[i++]=0x0F; p[i++]=0x30;
+
+    /* mov eax, cr0; or eax, 0x80000000; mov cr0, eax (PG) */
+    p[i++]=0x0F; p[i++]=0x20; p[i++]=0xC0;
+    p[i++]=0x0D; p[i++]=0x00; p[i++]=0x00; p[i++]=0x00; p[i++]=0x80;
+    p[i++]=0x0F; p[i++]=0x22; p[i++]=0xC0;
+
+    /* jmp far 0x18:0x8180 (64-bit CS) */
+    p[i++]=0xEA;
+    p[i++]=0x80; p[i++]=0x81; p[i++]=0x00; p[i++]=0x00;
+    p[i++]=0x18; p[i++]=0x00;
+
+    /* --- 64-bit stub at 0x8180 --- */
+    uint8_t *q = t + 0x180;
+    int j = 0;
+    /* mov rsp, [0x8F10] stack */
+    q[j++]=0x48; q[j++]=0x8B; q[j++]=0x24; q[j++]=0x25;
+    q[j++]=0x10; q[j++]=0x8F; q[j++]=0x00; q[j++]=0x00;
+    /* mov rax, [0x8F08] — wait entry is at 0x8F10? struct:
+       ready@0, pad@4, cr3@8, entry@16, stack@24
+    */
+    /* Fix: entry at 0x8F10, stack at 0x8F18 */
+    /* reload rsp from 0x8F18 */
+    j = 0;
+    q[j++]=0x48; q[j++]=0x8B; q[j++]=0x24; q[j++]=0x25;
+    q[j++]=0x18; q[j++]=0x8F; q[j++]=0x00; q[j++]=0x00;
+    /* and rsp, ~0xF */
+    q[j++]=0x48; q[j++]=0x83; q[j++]=0xE4; q[j++]=0xF0;
+    /* mov rax, [0x8F10] entry */
+    q[j++]=0x48; q[j++]=0xA1;
+    q[j++]=0x10; q[j++]=0x8F; q[j++]=0x00; q[j++]=0x00;
+    q[j++]=0x00; q[j++]=0x00; q[j++]=0x00; q[j++]=0x00;
+    /* call rax */
+    q[j++]=0xFF; q[j++]=0xD0;
+    /* hlt; jmp $ */
+    q[j++]=0xF4;
+    q[j++]=0xEB; q[j++]=0xFD;
+#else
+    /* i386: just hlt loop after mailbox */
+    p[i++]=0xFB; /* sti */
+    p[i++]=0xF4;
+    p[i++]=0xEB; p[i++]=0xFD;
+#endif
 
     __asm__ volatile("mfence" ::: "memory");
 }
+
 
 void smp_init(void) {
     for (int i = 0; i < NCPU_MAX; i++) {
@@ -173,46 +285,77 @@ void smp_init(void) {
     if (!bsp_found)
         pr_warn("smp: no BSP flagged in MADT — proceeding anyway\n");
 
-    volatile uint32_t *mailbox = (volatile uint32_t *)(uintptr_t)MAILBOX_PHYS;
-    *mailbox = 0;
+    /* Prepare AP boot block + stacks */
+    struct ap_boot_info *boot = AP_BOOT;
+    memset((void *)boot, 0, sizeof(*boot));
+#if defined(__x86_64__)
+    boot->cr3 = (uint64_t)(uintptr_t)ARCH_BOOT_PAGE_ROOT;
+    boot->entry = (uint64_t)(uintptr_t)ap_main;
+#endif
     __asm__ volatile("mfence" ::: "memory");
 
     install_trampoline();
 
     int started = 1; /* BSP */
     int attempted = 0;
+    int logical = 1; /* next logical id for AP */
     for (int i = 0; i < n; i++) {
         if (ai->cpus[i].is_bsp || !ai->cpus[i].enabled)
             continue;
         uint8_t apic = ai->cpus[i].apic_id;
+        if (logical >= NCPU_MAX)
+            break;
         attempted++;
-        pr_info("smp: starting APIC %u ...\n", apic);
 
-        uint32_t before = *mailbox;
+        /* Stack for this AP */
+        if (!ap_stacks[logical]) {
+            void *frames = pmm_alloc_frames(AP_STACK_SIZE / PAGE_SIZE);
+            if (!frames) {
+                pr_warn("smp: no stack for AP logical %d\n", logical);
+                continue;
+            }
+            ap_stacks[logical] = (uint8_t *)frames;
+        }
+        boot->stack = (uint64_t)(uintptr_t)(ap_stacks[logical] + AP_STACK_SIZE);
+        boot->cpu_id = (uint32_t)logical;
+        smp_logical[logical] = (int)apic;
+        process_prepare_ap_idle(logical);
+        ap_ready[logical] = 0;
+        uint32_t before = boot->ready;
+        __asm__ volatile("mfence" ::: "memory");
+
+        pr_info("smp: starting APIC %u as CPU %d ...\n", apic, logical);
         lapic_start_ap(apic, TRAMPOLINE_PHYS >> 12);
 
-        /* Wait up to ~50 ms of busy loops for the mailbox bump */
         int ok = 0;
-        for (int t = 0; t < 500000; t++) {
-            if (*mailbox > before) {
+        for (int t = 0; t < 1000000; t++) {
+            if (boot->ready > before && ap_ready[logical]) {
                 ok = 1;
                 break;
             }
+            if (boot->ready > before && t > 100000) {
+                /* trampoline ran; wait a bit more for ap_main */
+                ok = ap_ready[logical];
+                if (ok) break;
+            }
             __asm__ volatile("pause");
         }
-        if (ok) {
+        if (ok || boot->ready > before) {
             started++;
-            smp_ap_ok++;
-            pr_info("smp: APIC %u answered (mailbox=%u)\n", apic, *mailbox);
+            if (ok)
+                pr_info("smp: CPU %d APIC %u in long mode (ready=%u)\n",
+                        logical, apic, boot->ready);
+            else
+                pr_info("smp: APIC %u trampoline ok (C entry pending, ready=%u)\n",
+                        apic, boot->ready);
+            logical++;
         } else {
-            pr_warn("smp: APIC %u did not respond (mailbox still %u)\n",
-                    apic, *mailbox);
+            pr_warn("smp: APIC %u did not respond\n", apic);
         }
     }
 
     smp_online = started;
-    pr_info("smp: %d CPU(s) online of %d attempted (BSP scheduling only until 1.2.9)\n",
-            smp_online, attempted + 1);
+    pr_info("smp: %d CPU(s) online (%d AP attempted)\n", smp_online, attempted);
 
     extern void smp_mark_online(int count);
     smp_mark_online(smp_online);
@@ -406,4 +549,8 @@ int smp_rq_depth(int cpu) {
     if (cpu < 0 || cpu >= NCPU_MAX)
         return 0;
     return rq_depth[cpu];
+}
+
+void smp_note_steal(void) {
+    balance_steals++;
 }

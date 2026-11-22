@@ -3,6 +3,8 @@
 
 
 #include "interrupt.h"
+#include "smp.h"
+#include "lapic.h"
 #include "console.h"
 #include "log.h"
 #include "io.h"
@@ -444,7 +446,19 @@ static void default_exception_handler(struct interrupt_frame *frame) {
 }
 
 // Initialize IDT
+#if defined(__x86_64__)
+static void ipi_tlb_isr(struct interrupt_frame *f) {
+    (void)f;
+    smp_ipi_tlb_handler();
+}
+static void ipi_resched_isr(struct interrupt_frame *f) {
+    (void)f;
+    smp_ipi_resched_handler();
+}
+#endif
+
 void idt_init(void) {
+
     // Clear handlers
     for (int i = 0; i < IDT_SIZE; i++) {
         handlers[i] = NULL;
@@ -473,6 +487,18 @@ void idt_init(void) {
     
     // Remap PIC
     pic_remap();
+
+#if defined(__x86_64__)
+    /* LAPIC IPI vectors — registered when SMP brings up APs */
+    {
+        extern void ipi_stub_tlb(void);
+        extern void ipi_stub_resched(void);
+        set_idt_gate(IPI_VECTOR_TLB, (uintptr_t)ipi_stub_tlb, ARCH_KERNEL_CS, 0x8E);
+        set_idt_gate(IPI_VECTOR_RESCHED, (uintptr_t)ipi_stub_resched, ARCH_KERNEL_CS, 0x8E);
+        register_interrupt_handler(IPI_VECTOR_TLB, ipi_tlb_isr);
+        register_interrupt_handler(IPI_VECTOR_RESCHED, ipi_resched_isr);
+    }
+#endif
 }
 
 // Register handler for specific interrupt
