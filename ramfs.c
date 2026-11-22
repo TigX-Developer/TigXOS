@@ -154,7 +154,7 @@ static int split(const char *path, char *parent, size_t psz, char *base, size_t 
     if (!rel)
         return -1;
     /* find last component */
-    const char *last = rel;
+    const char *last = rel; (void)last;
     const char *slash = 0;
     for (const char *p = rel; *p; p++)
         if (*p == '/')

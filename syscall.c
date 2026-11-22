@@ -1,6 +1,6 @@
 
 
-/* syscall.c — int 0x80 dispatcher (TigxOS 1.1.12) */
+/* syscall.c — int 0x80 dispatcher (TigxOS 1.2.4, ABI v1) */
 #include "syscall.h"
 #include "io.h"
 #include "interrupt.h"
@@ -17,6 +17,9 @@
 #include "memory.h"
 #include "rtc.h"
 #include "version.h"
+#include "log.h"
+#include "spinlock.h"
+#include "acpi.h"
 #include "arch/arch.h"
 #include <stdint.h>
 
@@ -110,7 +113,7 @@ static int copy_to_user(uintptr_t udst, const void *ksrc, size_t len) {
 #define TIGFS_MAX_FILE (TIGFS_DIRECT * 512u)
 
 /* Serialize concurrent sys_spawn static buffers */
-static int spawn_busy;
+static spinlock_t spawn_lock = SPINLOCK_INIT;
 
 /* Copy a NUL-terminated path from user memory into kernel buffer. */
 static int copy_user_path(char *dst, size_t dst_len, uintptr_t user_ptr) {
@@ -131,10 +134,14 @@ static int copy_user_path(char *dst, size_t dst_len, uintptr_t user_ptr) {
 }
 
 static long sys_write(struct process *cur, long fd, uintptr_t buf, size_t len) {
-    if (!cur || fd < 0 || fd >= MAX_FDS)
-        return -1;
+    if (!cur)
+        return SY_EINVAL;
+    if (fd < 0 || fd >= MAX_FDS)
+        return SY_EBADF;
+    if (len > (1u << 20))  /* 1 MiB hard cap per call */
+        return SY_EINVAL;
     if (len && !user_range_ok(buf, len))
-        return -1;
+        return SY_EFAULT;
     struct open_file *o = of_get(cur->fds[fd].of_id);
     if (!o)
         return -1;
@@ -327,8 +334,10 @@ static long sys_open(struct process *cur, uintptr_t pathu, long flags) {
 }
 
 static long sys_close(struct process *cur, long fd) {
-    if (!cur || fd < 0 || fd >= MAX_FDS)
-        return -1;
+    if (!cur)
+        return SY_EINVAL;
+    if (fd < 0 || fd >= MAX_FDS)
+        return SY_EBADF;
     if (cur->fds[fd].of_id < 0)
         return -1;
     fd_close(cur, (int)fd);
@@ -583,10 +592,15 @@ static long sys_brk(struct process *cur, uintptr_t new_brk) {
         return -1;
     if (cur->heap_brk == 0)
         cur->heap_brk = USER_HEAP_BASE;
+    if (cur->heap_limit == 0)
+        cur->heap_limit = USER_HEAP_LIMIT;
     uintptr_t old = cur->heap_brk;
     if (new_brk == 0)
         return (long)old;
     if (new_brk < USER_HEAP_BASE || new_brk > USER_HEAP_MAX)
+        return -1;
+    /* Per-process soft limit (default USER_HEAP_LIMIT) */
+    if (new_brk > USER_HEAP_BASE + cur->heap_limit)
         return -1;
     /* Grow: map any missing pages covering [old, new_brk) */
     if (new_brk > old) {
@@ -736,18 +750,25 @@ static long sys_halt(struct process *cur) {
     if (strcmp(cur->name, "shell") != 0 && strcmp(cur->name, "shell.elf") != 0)
         return -1;
     process_request_halt();
-    kprintf("\nSystem halted.\n");
-    __asm__ volatile("cli");
-    /*
-     * isa-debug-exit: status = (code<<1)|1.
-     * code 0 → status 1 (tests treat as PASS) — do NOT use that here.
-     * code 2 → status 5 so a halt is not a green test run.
-     */
-    outb(0xf4, 0x02);
-    outw(0x604, 0x2000);
-    for (;;)
-        __asm__ volatile("hlt");
+    /* Prefer ACPI poweroff; falls back to QEMU ports. */
+    acpi_poweroff();
     return 0; /* not reached */
+}
+
+static long sys_poweroff(struct process *cur) {
+    if (!cur || !cur->is_user) return -1;
+    if (strcmp(cur->name, "shell") != 0 && strcmp(cur->name, "shell.elf") != 0)
+        return -1;
+    acpi_poweroff();
+    return 0;
+}
+
+static long sys_reboot(struct process *cur) {
+    if (!cur || !cur->is_user) return -1;
+    if (strcmp(cur->name, "shell") != 0 && strcmp(cur->name, "shell.elf") != 0)
+        return -1;
+    acpi_reboot();
+    return 0;
 }
 
 static long sys_setfg(struct process *cur, long pid) {
@@ -773,24 +794,16 @@ static long sys_spawn(struct process *cur, uintptr_t pathu, uintptr_t argvu,
     if (!resolved[0])
         return -1;
 
-    /* Serialize static staging buffers against concurrent spawn */
-    __asm__ volatile("cli");
-    while (spawn_busy) {
-        __asm__ volatile("sti");
-        process_yield();
-        __asm__ volatile("cli");
-    }
-    spawn_busy = 1;
-    __asm__ volatile("sti");
+    /* Serialize static staging buffers against concurrent spawn.
+     * 1.2.7: proper spinlock instead of home-made spawn_busy + raw cli/sti. */
+    spin_lock(&spawn_lock);
 
     static char arg_store[SPAWN_ARG_BUF];
     static char *kargv[SPAWN_MAX_ARGS + 1];
     int argc = copy_user_argv(argvu, arg_store, sizeof(arg_store),
                               kargv, SPAWN_MAX_ARGS);
     if (argc < 0) {
-        __asm__ volatile("cli");
-        spawn_busy = 0;
-        __asm__ volatile("sti");
+        spin_unlock(&spawn_lock);
         return -1;
     }
 
@@ -801,9 +814,7 @@ static long sys_spawn(struct process *cur, uintptr_t pathu, uintptr_t argvu,
         envc = copy_user_argv(envpu, env_store, sizeof(env_store),
                               kenvp, SPAWN_MAX_ARGS);
         if (envc < 0) {
-            __asm__ volatile("cli");
-            spawn_busy = 0;
-            __asm__ volatile("sti");
+            spin_unlock(&spawn_lock);
             return -1;
         }
     } else {
@@ -814,10 +825,39 @@ static long sys_spawn(struct process *cur, uintptr_t pathu, uintptr_t argvu,
                     envc > 0 ? kenvp : NULL);
     if (pid > 0 && cur)
         process_set_parent(process_lookup_pid(pid), cur->pid);
-    __asm__ volatile("cli");
-    spawn_busy = 0;
-    __asm__ volatile("sti");
+    spin_unlock(&spawn_lock);
     return pid;
+}
+
+
+/* SYS_DMESG: copy kernel log ring to user buffer.
+ * args: buf, len, offset  →  bytes copied (0 = EOF / empty)
+ */
+static long sys_dmesg(struct process *cur, uintptr_t bufu, size_t len, size_t off) {
+    (void)cur;
+    if (len == 0)
+        return 0;
+    if (len > 65536)
+        return SY_EINVAL;
+    if (!user_range_writable(bufu, len))
+        return SY_EFAULT;
+    /* Stage through a kernel temporary buffer (page-sized chunks). */
+    char kbuf[512];
+    size_t total = 0;
+    while (total < len) {
+        size_t chunk = len - total;
+        if (chunk > sizeof(kbuf))
+            chunk = sizeof(kbuf);
+        size_t got = log_read(kbuf, chunk, off + total);
+        if (got == 0)
+            break;
+        if (copy_to_user(bufu + total, kbuf, got) != 0)
+            return SY_EFAULT;
+        total += got;
+        if (got < chunk)
+            break;
+    }
+    return (long)total;
 }
 
 static void syscall_dispatch(struct interrupt_frame *frame) {
@@ -912,9 +952,20 @@ static void syscall_dispatch(struct interrupt_frame *frame) {
     case SYS_HALT:
         ret = (uint32_t)sys_halt(cur);
         break;
+    case SYS_ABI_VERSION:
+        ret = (uint32_t)TIGX_SYSCALL_ABI;
+        break;
+    case SYS_DMESG:
+        ret = (uint32_t)sys_dmesg(cur, (uintptr_t)a0, (size_t)a1, (size_t)a2);
+        break;
+    case SYS_POWEROFF:
+        ret = (uint32_t)sys_poweroff(cur);
+        break;
+    case SYS_REBOOT:
+        ret = (uint32_t)sys_reboot(cur);
+        break;
     default:
-        kprintf("syscall: unknown %u\n", (unsigned)num);
-        ret = (uint32_t)-1;
+        ret = (uint32_t)SY_ENOSYS;
         break;
     }
     frame->eax = ret;
@@ -1007,9 +1058,20 @@ static void syscall_dispatch(struct interrupt_frame *frame) {
     case SYS_HALT:
         ret = (uint64_t)sys_halt(cur);
         break;
+    case SYS_ABI_VERSION:
+        ret = (uint64_t)TIGX_SYSCALL_ABI;
+        break;
+    case SYS_DMESG:
+        ret = (uint64_t)sys_dmesg(cur, (uintptr_t)a0, (size_t)a1, (size_t)a2);
+        break;
+    case SYS_POWEROFF:
+        ret = (uint64_t)sys_poweroff(cur);
+        break;
+    case SYS_REBOOT:
+        ret = (uint64_t)sys_reboot(cur);
+        break;
     default:
-        kprintf("syscall: unknown %u\n", (unsigned)num);
-        ret = (uint64_t)-1;
+        ret = (uint64_t)SY_ENOSYS;
         break;
     }
     frame->rax = ret;
@@ -1020,5 +1082,5 @@ void syscall_init(void) {
     set_idt_gate(SYSCALL_VECTOR, (uintptr_t)syscall_stub,
                  ARCH_KERNEL_CS, 0xEE);
     register_interrupt_handler(SYSCALL_VECTOR, syscall_dispatch);
-    kprintf("Syscall: int 0x80 DPL=3 (+PIPE)\n");
+    kprintf_color(TIG_OK, "Syscall: int 0x80 DPL=3  ABI v%d\n", TIGX_SYSCALL_ABI);
 }

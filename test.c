@@ -1,10 +1,7 @@
-
-
-/* test.c - Tiny test framework for TigxOS 1.1.12
+/* test.c — Tiny test framework for TigxOS (1.2.8-update3)
  *
- * Uses CP437 single-byte box glyphs (ISO.F16).  Do NOT use UTF-8 here —
- * VGA text mode feeds each byte straight to the font, so multi-byte
- * UTF-8 sequences print as garbage (what you saw as weird characters).
+ * Uses CP437 single-byte box glyphs (ISO.F16). Do NOT use UTF-8 here —
+ * VGA text mode feeds each byte straight to the font.
  */
 #include "test.h"
 #include "console.h"
@@ -12,13 +9,12 @@
 #include "string.h"
 #include <stdarg.h>
 
-/* CP437 box-drawing (single byte each) */
-#define BOX_TL  "\xDA"   /* ┌ */
-#define BOX_TR  "\xBF"   /* ┐ */
-#define BOX_BL  "\xC0"   /* └ */
-#define BOX_BR  "\xD9"   /* ┘ */
-#define BOX_H   "\xC4"   /* ─ */
-#define BOX_V   "\xB3"   /* │ */
+#define BOX_TL  "\xDA"
+#define BOX_TR  "\xBF"
+#define BOX_BL  "\xC0"
+#define BOX_BR  "\xD9"
+#define BOX_H   "\xC4"
+#define BOX_V   "\xB3"
 
 static int g_total_failed = 0;
 static int g_total_checks = 0;
@@ -44,7 +40,6 @@ void test_begin(struct test_ctx *t, const char *name) {
     kprintf_color(TIG_HEADER, BOX_TR "\n");
 }
 
-
 void test_check(struct test_ctx *t, int cond, const char *what) {
     t->checks++;
     if (!cond)
@@ -55,6 +50,17 @@ void test_check(struct test_ctx *t, int cond, const char *what) {
         kprintf_color(TIG_OK, "[OK] ");
     else
         kprintf_color(TIG_FAIL, "[X]  ");
+    kprintf_color(TIG_INFO, "%s\n", what ? what : "(null)");
+}
+
+void test_check_soft(struct test_ctx *t, int cond, const char *what) {
+    t->checks++;
+    /* Soft: never increments failed — only notes the outcome */
+    kprintf_color(TIG_DIM, BOX_V " ");
+    if (cond)
+        kprintf_color(TIG_OK, "[OK] ");
+    else
+        kprintf_color(TIG_WARN, "[~]  ");
     kprintf_color(TIG_INFO, "%s\n", what ? what : "(null)");
 }
 
@@ -85,7 +91,6 @@ void test_end(struct test_ctx *t) {
                       t->checks - t->failed, t->checks, (unsigned)dt);
     }
 }
-
 
 int test_tick_delta_ok(uint32_t got, uint32_t want, uint32_t tol_pct) {
     uint32_t tol = want * tol_pct / 100;

@@ -1,14 +1,16 @@
-/* process.c — preemptive scheduler, wait/kill, fg job, ps snapshot (TigxOS 1.2.0) */
+/* process.c — preemptive scheduler, wait/kill, fg job, ps snapshot (TigxOS 1.2.3) */
 
 
 
 #include "process.h"
+#include "smp.h"
 #include "filetable.h"
 #include "memory.h"
 #include "console.h"
 #include "string.h"
 #include "timer.h"
 #include "wait.h"
+#include "spinlock.h"
 #include "arch/arch.h"
 #include "gdt.h"
 #include "elf.h"
@@ -19,13 +21,55 @@
 #define TIME_SLICE_TICKS 5  /* ~50 ms at 100 Hz */
 
 static struct process process_table[MAX_PROCESSES];
-static struct process *current = NULL;
 static int scheduler_enabled = 0;
+
+/* Per-CPU data (SMP-ready). Only CPU 0 is online until 1.2.8. */
+static struct cpu_data cpus[NCPU_MAX];
+static int ncpu_online = 1;
+
+/* Protects process_table state transitions and pick_next. */
+static spinlock_t sched_lock;
+
+/* Round-robin cursor per priority level (CPU 0). */
+static int rr_cursor[PRIO_MAX + 1];
+
+struct cpu_data *cpu_this(void) {
+    int id = smp_cpu_id();
+    if (id < 0 || id >= NCPU_MAX)
+        id = 0;
+    return &cpus[id];
+}
+
+int cpu_count_online(void) {
+    return ncpu_online;
+}
+
+void smp_mark_online(int count) {
+    if (count < 1) count = 1;
+    if (count > NCPU_MAX) count = NCPU_MAX;
+    ncpu_online = count;
+    for (int i = 0; i < NCPU_MAX; i++)
+        cpus[i].online = (i < count);
+}
+
+/* Convenience: current process on this CPU (per-CPU after 1.2.9) */
+#define current (cpu_this()->cur)
 
 void process_init(void) {
     memset(process_table, 0, sizeof(process_table));
-    current = NULL;
+    memset(cpus, 0, sizeof(cpus));
+    memset(rr_cursor, 0, sizeof(rr_cursor));
     scheduler_enabled = 0;
+    ncpu_online = 1;
+    spin_lock_init(&sched_lock);
+
+    for (int i = 0; i < NCPU_MAX; i++) {
+        cpus[i].id = i;
+        cpus[i].online = (i == 0);
+        cpus[i].cur = NULL;
+        cpus[i].switches = 0;
+        cpus[i].ticks = 0;
+    }
 
     /*
      * pid 0 = idle at table index 0.
@@ -47,13 +91,16 @@ void process_init(void) {
     idle->user_stack_base = NULL;
     idle->is_user = 0;
     idle->time_slice = TIME_SLICE_TICKS;
+    idle->priority = PRIO_IDLE;
+    idle->ticks_ran = 0;
+    idle->on_cpu = 0;
     idle->wake_tick = 0;
     strncpy(idle->cwd, "/", PATH_MAX - 1);
     idle->cwd[PATH_MAX - 1] = '\0';
-    current = idle;
+    cpus[0].cur = idle;
     tss_set_kernel_stack(idle->kernel_stack_top);
 
-    kprintf("Process subsystem OK (preemptive, blocking, ring3)\n");
+    kprintf("Process subsystem OK (preemptive, blocking, ring3, SMP-ready)\n");
 }
 
 static uintptr_t *build_stack(void (*entry)(void), uintptr_t *base) {
@@ -263,11 +310,13 @@ int process_wait(int pid) {
         }
 
         /* Block until child exits (process_exit wakes us). */
-        __asm__ volatile("cli");
-        cur->state = PROC_BLOCKED;
-        cur->wake_tick = 0; /* not timed */
-        schedule();
-        __asm__ volatile("sti");
+        {
+            unsigned long flags = irq_save();
+            cur->state = PROC_BLOCKED;
+            cur->wake_tick = 0; /* not timed */
+            schedule();
+            irq_restore(flags);
+        }
     }
 }
 
@@ -316,6 +365,9 @@ int process_create(const char *name, void (*entry)(void)) {
     p->exit_status = 0;
     process_init_fds(p);
     p->time_slice = TIME_SLICE_TICKS;
+    p->priority = PRIO_DEFAULT;
+    p->ticks_ran = 0;
+    p->on_cpu = -1;
     p->wake_tick = 0;
     if (current && current->cwd[0]) {
         strncpy(p->cwd, current->cwd, PATH_MAX - 1);
@@ -410,6 +462,9 @@ int process_create_user(const char *name, void (*user_entry)(void)) {
     p->exit_status = 0;
     process_inherit_fds(p, current);
     p->time_slice = TIME_SLICE_TICKS;
+    p->priority = PRIO_DEFAULT;
+    p->ticks_ran = 0;
+    p->on_cpu = -1;
     p->wake_tick = 0;
     if (current && current->cwd[0]) {
         strncpy(p->cwd, current->cwd, PATH_MAX - 1);
@@ -474,6 +529,9 @@ int process_create_user_at(const char *name, uintptr_t entry, uintptr_t user_sp)
     p->exit_status = 0;
     process_inherit_fds(p, current);
     p->time_slice = TIME_SLICE_TICKS;
+    p->priority = PRIO_DEFAULT;
+    p->ticks_ran = 0;
+    p->on_cpu = -1;
     p->wake_tick = 0;
     if (current && current->cwd[0]) {
         strncpy(p->cwd, current->cwd, PATH_MAX - 1);
@@ -648,6 +706,7 @@ int spawn(const char *path, char *const argv[], char *const envp[]) {
     process_table[pid].user_stack_base = NULL;
     process_table[pid].as = as;
     process_table[pid].heap_brk = 0; /* SYS_BRK starts at USER_HEAP_BASE on first use */
+    process_table[pid].heap_limit = USER_HEAP_LIMIT;
     return pid;
 }
 
@@ -673,6 +732,7 @@ static void process_finalize(struct process *p) {
         aspace_destroy(p->as);
         p->as = NULL;
         p->heap_brk = 0;
+        p->heap_limit = USER_HEAP_LIMIT;
     }
     p->rsp = NULL;
     p->wake_tick = 0;
@@ -787,9 +847,9 @@ void process_exit(int status) {
     current->wake_tick = 0;
     process_wake_waiters(current->pid);
 
-    __asm__ volatile("cli");
+    unsigned long __eflags = irq_save();
     schedule();
-    __asm__ volatile("sti");
+    irq_restore(__eflags);
     while (1)
         __asm__ volatile("hlt");
 }
@@ -942,9 +1002,9 @@ void process_wake_timed(void) {
 
 void process_yield(void) {
     if (scheduler_enabled) {
-        __asm__ volatile("cli");
+        unsigned long flags = irq_save();
         schedule();
-        __asm__ volatile("sti");
+        irq_restore(flags);
     }
 }
 
@@ -1021,46 +1081,57 @@ void process_list(void) {
     kprintf("\n");
 }
 
+/* Pick highest-priority READY task; RR within the same priority.
+ * Caller must hold sched_lock (or IF=0 on uniprocessor). */
 static struct process *pick_next(void) {
-    int start = 0;
-    if (current) {
-        for (int i = 0; i < MAX_PROCESSES; i++) {
-            if (&process_table[i] == current) {
-                start = i;
-                break;
+    for (int prio = PRIO_MAX; prio >= PRIO_MIN; prio--) {
+        int start = rr_cursor[prio];
+        for (int n = 0; n < MAX_PROCESSES; n++) {
+            int i = (start + n) % MAX_PROCESSES;
+            struct process *p = &process_table[i];
+            if (p->state == PROC_READY && p->priority == prio) {
+                rr_cursor[prio] = (i + 1) % MAX_PROCESSES;
+                return p;
             }
         }
-    }
-    for (int n = 1; n <= MAX_PROCESSES; n++) {
-        int i = (start + n) % MAX_PROCESSES;
-        if (process_table[i].state == PROC_READY)
-            return &process_table[i];
     }
     /* Fallback: idle (pid 0). Force READY if somehow invalid. */
     if (process_table[0].state != PROC_READY &&
         process_table[0].state != PROC_RUNNING)
         process_table[0].state = PROC_READY;
+    process_table[0].priority = PRIO_IDLE;
     return &process_table[0];
 }
 
-/* schedule() requires IF=0 (caller cli). Returns with IF still 0.
- * Idle (pid 0) is never blocked; pick_next falls back to it if nothing READY. */
+/* schedule() requires IF=0 (caller cli or sched_lock). Returns with IF still 0.
+ * Idle (pid 0) is never blocked; pick_next falls back to it if nothing READY.
+ *
+ * Current must be marked READY *before* pick_next so a sole high-prio task
+ * can be selected again (otherwise it is invisible while still RUNNING and
+ * always loses the CPU to any lower-prio READY task on every yield/preempt). */
 void schedule(void) {
     if (!scheduler_enabled || !current)
         return;
     process_reap();
+    /* Demote first so pick_next can re-select us at our priority. */
+    if (current->state == PROC_RUNNING)
+        current->state = PROC_READY;
     struct process *next = pick_next();
     if (next == current) {
+        current->state = PROC_RUNNING;
         current->time_slice = TIME_SLICE_TICKS;
         return;
     }
     struct process *prev = current;
-    /* Only demote RUNNING → READY. Leave BLOCKED and DEAD as-is. */
-    if (prev->state == PROC_RUNNING)
-        prev->state = PROC_READY;
+    /* prev is already READY (or was BLOCKED/DEAD — leave those alone). */
     next->state = PROC_RUNNING;
     next->time_slice = TIME_SLICE_TICKS;
-    current = next;
+    next->on_cpu = smp_cpu_id();
+    {
+        struct cpu_data *cd = cpu_this();
+        cd->cur = next;
+        cd->switches++;
+    }
     if (next->as)
         aspace_switch(next->as);
     else
@@ -1075,6 +1146,13 @@ void schedule(void) {
 void scheduler_tick(void) {
     if (!scheduler_enabled || !current)
         return;
+    current->ticks_ran++;
+    cpu_this()->ticks++;
+    if (smp_need_resched()) {
+        smp_clear_need_resched();
+        schedule();
+        return;
+    }
     if (--current->time_slice <= 0) {
         /* Called from timer IRQ with interrupts already disabled */
         schedule();
@@ -1089,3 +1167,32 @@ void scheduler_start(void) {
 }
 
 int scheduler_is_enabled(void) { return scheduler_enabled; }
+
+int process_set_priority(int pid, int prio) {
+    if (prio < PRIO_MIN || prio > PRIO_MAX)
+        return -1;
+    if (pid == 0)
+        return -1; /* idle stays PRIO_IDLE */
+    struct process *p = process_lookup_pid(pid);
+    if (!p)
+        return -1;
+    unsigned long flags = irq_save();
+    p->priority = prio;
+    irq_restore(flags);
+    return 0;
+}
+
+int process_get_priority(int pid) {
+    struct process *p = process_lookup_pid(pid);
+    if (!p)
+        return -1;
+    return p->priority;
+}
+
+void process_reset_ticks(void) {
+    unsigned long flags = irq_save();
+    for (int i = 0; i < MAX_PROCESSES; i++)
+        process_table[i].ticks_ran = 0;
+    cpus[0].ticks = 0;
+    irq_restore(flags);
+}

@@ -4,6 +4,7 @@
 #include "console.h"
 #include "io.h"
 #include "spinlock.h"
+#include "log.h"
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -30,7 +31,7 @@
 
 static volatile unsigned short *const vga = (volatile unsigned short *)VGA_MEMORY;
 static int cursor_x = 0, cursor_y = 0;
-static unsigned char color = 0x0F;
+static unsigned char color = 0x0F; /* bright white on black (body text) */
 static int cursor_visible = 1;
 static int serial_ready = 0;
 void serial_putchar(char c);  /* defined later; used by putchar_raw */
@@ -147,9 +148,36 @@ static unsigned char cp437_from_unicode(unsigned cp) {
     }
 }
 
+/* Line accumulator so every kprintf line also lands in the dmesg ring.
+ * Flushed on newline or when full. Recursion-safe via log_ring_raw. */
+static char   kprintf_line[192];
+static size_t kprintf_line_len;
+
+static void kprintf_line_flush(void) {
+    if (kprintf_line_len == 0)
+        return;
+    log_ring_raw(LOG_INFO, kprintf_line, kprintf_line_len);
+    kprintf_line_len = 0;
+}
+
 static void putchar_unlocked(char ch) {
     static unsigned cp, need;
     unsigned char c = (unsigned char)ch;
+
+    /* Accumulate printable ASCII for the ring (ignore UTF-8 continuation) */
+    if (c == '\n' || c == '\r') {
+        if (kprintf_line_len < sizeof(kprintf_line) - 1)
+            kprintf_line[kprintf_line_len++] = (char)c;
+        kprintf_line_flush();
+    } else if (c >= 0x20 && c < 0x80) {
+        if (kprintf_line_len < sizeof(kprintf_line) - 1)
+            kprintf_line[kprintf_line_len++] = (char)c;
+        else {
+            kprintf_line_flush();
+            kprintf_line[kprintf_line_len++] = (char)c;
+        }
+    }
+
     if (need) {
         if ((c & 0xC0) == 0x80) {
             cp = (cp << 6) | (c & 0x3F);

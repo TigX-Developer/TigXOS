@@ -52,6 +52,18 @@ int sysinfo(struct sys_sysinfo *info) {
     return (int)syscall(SYS_SYSINFO, (long)info, 0, 0);
 }
 
+long dmesg(char *buf, size_t len, size_t off) {
+    return syscall(SYS_DMESG, (long)buf, (long)len, (long)off);
+}
+
+void poweroff(void) {
+    syscall(SYS_POWEROFF, 0, 0, 0);
+}
+
+void reboot(void) {
+    syscall(SYS_REBOOT, 0, 0, 0);
+}
+
 int psinfo(struct sys_psinfo *info) {
     return (int)syscall(SYS_PSINFO, (long)info, 0, 0);
 }

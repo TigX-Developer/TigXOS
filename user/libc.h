@@ -1,36 +1,40 @@
-/* user/libc.h — minimal libc for ring-3 (1.1.12 syscall ABI) */
+/* user/libc.h — minimal libc for ring-3 (syscall ABI v1, TigxOS 1.2.4+) */
 #ifndef USER_LIBC_H
 #define USER_LIBC_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-/* Match kernel syscall.h numbers */
-#define SYS_EXIT        0
-#define SYS_WRITE       1
-#define SYS_YIELD       2
-#define SYS_GETPID      3
-#define SYS_SLEEP_MS    4
-#define SYS_READ        5
-#define SYS_OPEN        6
-#define SYS_CLOSE       7
-#define SYS_GETDENTS    8
-#define SYS_SPAWN       9
-#define SYS_WAIT       10
-#define SYS_UNLINK     11
-#define SYS_STAT       12
-#define SYS_DUP        13   /* oldfd → newfd or -1 */
-#define SYS_DUP2       14
-#define SYS_PIPE       15
-#define SYS_KILL       16
-#define SYS_SETFG      17
-#define SYS_BRK        18   /* new_brk → previous brk or -1 */
-#define SYS_CHDIR      19
-#define SYS_GETCWD     20
-#define SYS_SYSINFO    21
-#define SYS_PSINFO     22
-#define SYS_MKDIR      24
-#define SYS_HALT       23   /* power off / hang cleanly */
+/* Match kernel syscall.h — stable ABI v1 (1.2.4+) */
+#define SYS_EXIT         0
+#define SYS_WRITE        1
+#define SYS_YIELD        2
+#define SYS_GETPID       3
+#define SYS_SLEEP_MS     4
+#define SYS_READ         5
+#define SYS_OPEN         6
+#define SYS_CLOSE        7
+#define SYS_GETDENTS     8
+#define SYS_SPAWN        9
+#define SYS_WAIT        10
+#define SYS_UNLINK      11
+#define SYS_STAT        12
+#define SYS_DUP         13
+#define SYS_DUP2        14
+#define SYS_PIPE        15
+#define SYS_KILL        16
+#define SYS_SETFG       17
+#define SYS_BRK         18
+#define SYS_CHDIR       19
+#define SYS_GETCWD      20
+#define SYS_SYSINFO     21
+#define SYS_PSINFO      22
+#define SYS_HALT        23
+#define SYS_MKDIR       24
+#define SYS_ABI_VERSION 25
+#define SYS_DMESG       26
+#define SYS_POWEROFF    27
+#define SYS_REBOOT      28
 #define SIGINT   2
 #define SIGKILL  9
 #define SIGTERM 15
@@ -82,6 +86,9 @@ int  open(const char *path, int flags);
 int  chdir(const char *path);
 int  getcwd(char *buf, size_t size);
 int  sysinfo(struct sys_sysinfo *info);
+long dmesg(char *buf, size_t len, size_t off);
+void poweroff(void);
+void reboot(void);
 
 /* Process table snapshot (SYS_PSINFO) */
 struct sys_proc_info {

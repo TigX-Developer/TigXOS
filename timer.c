@@ -3,6 +3,7 @@
 #include "timer.h"
 #include "interrupt.h"
 #include "console.h"
+#include "spinlock.h"
 #include "io.h"
 #include "process.h"
 #include "wait.h"
@@ -73,9 +74,9 @@ void timer_sleep_ms(uint32_t ms) {
     if (wake == 0)
         wake = 1;
 
-    __asm__ volatile("cli");
+    unsigned long flags = irq_save();
     process_block_current(wake);
-    __asm__ volatile("sti");
+    irq_restore(flags);
 }
 
 uint32_t timer_get_ticks(void) { return tick_count; }

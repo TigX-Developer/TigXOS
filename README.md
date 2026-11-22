@@ -2,7 +2,7 @@
 
 **A dual-architecture hobby OS — thin kernel in C, userland in C and Green Lizard.**
 
-[![Version](https://img.shields.io/badge/version-1.2.1-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.2.8-update1-blue)](CHANGELOG.md)
 [![Arch](https://img.shields.io/badge/arch-i386%20%7C%20x86__64-green)](#build)
 [![Lang](https://img.shields.io/badge/kernel-C-orange)](#languages)
 [![Lang](https://img.shields.io/badge/userland-C%20%2B%20Green%20Lizard-purple)](#languages)
@@ -62,12 +62,12 @@ See **[lizard/README.md](lizard/README.md)** for syntax, `argc`/`argv`, and limi
 | Version | Highlights |
 |---------|------------|
 | **1.2.0** | GDT/IDT, address-space, and memory audit fixes |
-| **1.2.1** | **VFS** + hierarchical **TigFS v6**, ramfs at `/tmp`, expanded tests |
+| **1.2.3** | **VFS** + hierarchical **TigFS v6**, ramfs at `/tmp`, expanded tests |
 
 
 ---
 
-## Features (v1.2.1 — VFS + TigFS directories + ramfs)
+## Features (v1.2.3 — VFS + TigFS directories + ramfs)
 
 - **Dual-arch kernel** — i386 protected mode & x86_64 long mode  
 - **Processes** — address spaces, preemptive scheduling, wait / kill / ps / top  
@@ -153,7 +153,7 @@ bin/hello.elf ...
 ## Versioning
 
 - `version.h` is the only version source of truth  
-- Current series: **1.2.x — Kernel infrastructure** (at 1.2.1)  
+- Current series: **1.2.x — Kernel infrastructure** (at 1.2.3)  
 - Bug fixes usually stay in the same version; bumps are deliberate  
 
 Roadmap target: usable desktop-style OS by **2.0** (graphics, networking, apps).

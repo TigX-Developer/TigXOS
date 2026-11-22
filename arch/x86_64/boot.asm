@@ -7,7 +7,9 @@ KERNEL_OFFSET  equ 0x10000
 MEMMAP_COUNT   equ 0x9000
 MEMMAP_ENTRIES equ 0x9004
 MEMMAP_MAX     equ 64
-KERNEL_SECTS   equ 320
+%ifndef KERNEL_SECTS
+KERNEL_SECTS   equ 384   ; normally passed by the makefile (-dKERNEL_SECTS=...)
+%endif
 
 start:
     xor ax, ax

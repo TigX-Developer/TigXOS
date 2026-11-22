@@ -1,4 +1,4 @@
-// kernel.c - TigxOS 1.1.12
+// kernel.c - TigxOS 1.2.8
 // Expanded test framework + semantic color palette
 
 
@@ -26,6 +26,10 @@
 #include "elf.h"
 #include "embed_hello.h"
 #include "test.h"
+#include "log.h"
+#include "acpi.h"
+#include "lapic.h"
+#include "smp.h"
 #include <stdint.h>
 
 /* ---------- Test registry ---------- */
@@ -55,7 +59,10 @@ static const struct test_entry test_table[] = {
     { 'r', "rtc",        test_suite_rtc        },
     { 'g', "gdt",        test_suite_gdt        },
     { 'a', "aspace",     test_suite_aspace     },
+    { 'S', "sched",      test_suite_sched      },
     { 'm', "ramfs",      test_suite_ramfs      },
+    { 'A', "atomic",     test_suite_atomic     },
+    { 'M', "smp",        test_suite_smp        },
     { '0', "regression", test_suite_regression },
 };
 #define TEST_TABLE_N (sizeof(test_table)/sizeof(test_table[0]))
@@ -104,11 +111,18 @@ static void test_runner_task(void) {
 
 /* ---------- Banner ---------- */
 static void print_banner(void) {
+    kprintf_color(TIG_ORANGE,  "  ╔══════════════════════════════════════╗\n");
+    kprintf_color(TIG_ORANGE,  "  ║  ");
     kprintf_color(TIG_BRAND_A, "Tig");
     kprintf_color(TIG_BRAND_B, "x");
     kprintf_color(TIG_BRAND_A, "OS");
-    kprintf_color(TIG_INFO,    " V" TIGX_VERSION);
-    kprintf_color(TIG_ACCENT,  " — ring3 + syscalls + test framework\n");
+    kprintf_color(TIG_INFO,    "  V" TIGX_VERSION);
+    kprintf_color(TIG_DIM,     "              ");
+    kprintf_color(TIG_ORANGE,  "║\n");
+    kprintf_color(TIG_ORANGE,  "  ║  ");
+    kprintf_color(TIG_DIM,     "orange · black · ring3");
+    kprintf_color(TIG_ORANGE,  "            ║\n");
+    kprintf_color(TIG_ORANGE,  "  ╚══════════════════════════════════════╝\n");
 }
 
 
@@ -152,14 +166,21 @@ void kmain(void) {
 
     console_clear();
     font_init();
+    log_init();
 
     print_banner();
-    kprintf_color(TIG_HEADER, "Req: ");
-    kprintf_color(TIG_INFO, "128 MB RAM installed / 512 MB disk\n");
-    kprintf_color(TIG_WARN, "======================================\n\n");
+    kprintf_color(TIG_DIM,    "  ");
+    kprintf_color(TIG_ORANGE, "● ");
+    kprintf_color(TIG_INFO,   "128 MB RAM");
+    kprintf_color(TIG_DIM,    "  ·  ");
+    kprintf_color(TIG_ORANGE, "● ");
+    kprintf_color(TIG_INFO,   "512 MB disk\n\n");
 
     memory_init();
     aspace_init();
+
+    kprintf_color(TIG_HEADER, "ACPI...\n");
+    acpi_init();
 
     kprintf_color(TIG_HEADER, "GDT+TSS...\n");
     gdt_init();
@@ -182,9 +203,38 @@ void kmain(void) {
     filetable_init();
     pipe_init();
     process_init();
+
+    /* SMP foundation (1.2.8): LAPIC + AP bring-up. After process_init so
+       smp_mark_online can update cpu_data[]. Only BSP schedules until 1.2.9. */
+    kprintf_color(TIG_HEADER, "LAPIC...\n");
+    lapic_init();
+    kprintf_color(TIG_HEADER, "SMP...\n");
+    smp_init();
+    smp_ipi_init();
+
     seed_shell_from_embed();
 
+#ifdef TIGX_BOOT_TESTS
+    /*
+     * Boot-test mode: do NOT spawn the interactive shell. It races with the
+     * test-runner on the filesystem / filetable / scheduler and produces
+     * flaky VFS failures (and occasional deadlocks that look like a hang).
+     * Only the dedicated test-runner kernel thread is started.
+     */
+    process_list();
 
+    __asm__ volatile("sti");
+    kprintf_color(TIG_OK, "Interrupts on — timer will preempt\n");
+    scheduler_start();
+
+    {
+        int tid = process_create("test-runner", test_runner_task);
+        if (tid < 0)
+            kprintf_color(TIG_FAIL, "test-runner spawn failed\n");
+        else
+            kprintf_color(TIG_INFO, "test-runner started (pid %d)\n", tid);
+    }
+#else
     /* Userland shell owns the keyboard. Do NOT start kernel shell_task —
        it single-key binds (h=help, l=list, …) and steals typed commands. */
     {
@@ -200,20 +250,6 @@ void kmain(void) {
     __asm__ volatile("sti");
     kprintf_color(TIG_OK, "Interrupts on — timer will preempt\n");
     scheduler_start();
-
-#ifdef TIGX_BOOT_TESTS
-    /*
-     * Timer suite (and any blocking test) needs a real scheduled process
-     * with IRQs live. Create a kernel thread to run the suites; it will
-     * exit QEMU via isa-debug-exit when finished.
-     */
-    {
-        int tid = process_create("test-runner", test_runner_task);
-        if (tid < 0)
-            kprintf_color(TIG_FAIL, "test-runner spawn failed\n");
-        else
-            kprintf_color(TIG_INFO, "test-runner started (pid %d)\n", tid);
-    }
 #endif
 
     while (1) {

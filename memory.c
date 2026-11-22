@@ -454,21 +454,27 @@ void vmm_init(void) {
 
 #endif /* __x86_64__ */
 
-/* -------------------- Heap (identity-mapped physical) -------------------- */
+/* -------------------- Heap (identity-mapped physical) — 1.2.2 -------------------- */
 #define HEAP_MAGIC     0xDEADBEEFu
+#define HEAP_CANARY    0xC0FFEE42u
 #define HEAP_ALIGN     16
 #define HEAP_MIN_SPLIT 32
 
 struct heap_block {
-    uint32_t magic, size;
+    uint32_t magic, size;       /* size = whole block including header */
     uint8_t  used, pad[3];
     struct heap_block *next, *prev;
 };
-#define HDR_SIZE sizeof(struct heap_block)
+/* Payload must be 16-byte aligned; round header up to HEAP_ALIGN. */
+#define HDR_SIZE ((sizeof(struct heap_block) + (HEAP_ALIGN - 1)) & ~((size_t)HEAP_ALIGN - 1))
+#define CANARY_SIZE 4
 
 static struct heap_block *heap_root = NULL;
 static size_t heap_total = 0, heap_used = 0, heap_free_bytes = 0;
 static size_t heap_allocs = 0, heap_frees = 0;
+static size_t heap_peak = 0;           /* peak heap_used */
+static size_t heap_fail_canary = 0;    /* canary mismatches detected */
+static size_t heap_fail_magic = 0;
 static spinlock_t heap_lock = SPINLOCK_INIT;
 
 void heap_init(void) {
@@ -491,18 +497,23 @@ void heap_init(void) {
         return;
     }
 
+    /* Reserve the last page as an unallocated guard zone (still mapped for
+     * simplicity on identity heap; allocator never hands it out). */
+    size_t usable = (pages - 1) * PAGE_SIZE;
     heap_root = (struct heap_block *)mem;
     heap_root->magic = HEAP_MAGIC;
-    heap_root->size  = pages * PAGE_SIZE;
+    heap_root->size  = (uint32_t)usable;
     heap_root->used  = 0;
     heap_root->next  = heap_root->prev = NULL;
-    heap_total = heap_root->size;
+    heap_total = usable;
     heap_free_bytes = heap_total - HDR_SIZE;
     heap_used = 0;
+    heap_peak = 0;
+    heap_fail_canary = heap_fail_magic = 0;
     spin_lock_init(&heap_lock);
-    kprintf("Heap at 0x%016x (%d KB)\n",
-            (unsigned long long)(uintptr_t)heap_root,
-            (uint32_t)(heap_total / 1024));
+    kprintf("Heap at %p (%u KB + 4KB guard)\n",
+            (void *)heap_root,
+            (unsigned)(heap_total / 1024));
 }
 
 static size_t align_up(size_t n) {
@@ -511,30 +522,38 @@ static size_t align_up(size_t n) {
 
 void *kmalloc(size_t size) {
     if (!size || !heap_root) return NULL;
-    if (size > (size_t)-1 - HDR_SIZE - HEAP_ALIGN) return NULL; /* overflow guard */
+    if (size > (size_t)-1 - HDR_SIZE - CANARY_SIZE - HEAP_ALIGN) return NULL;
     size = align_up(size);
-    size_t need = size + HDR_SIZE;
+    /* Block size must stay 16-byte aligned so split successors stay aligned. */
+    size_t need = align_up(size + HDR_SIZE + CANARY_SIZE);
 
     unsigned long flags = spin_lock_irqsave(&heap_lock);
     void *ret = NULL;
     for (struct heap_block *c = heap_root; c; c = c->next) {
+        if (c->magic != HEAP_MAGIC)
+            continue; /* skip corrupted nodes */
         if (!c->used && c->size >= need) {
             if (c->size >= need + HDR_SIZE + HEAP_MIN_SPLIT) {
                 struct heap_block *n = (struct heap_block *)((uint8_t *)c + need);
                 n->magic = HEAP_MAGIC;
-                n->size  = c->size - need;
+                n->size  = c->size - (uint32_t)need;
                 n->used  = 0;
                 n->next  = c->next;
                 n->prev  = c;
                 if (c->next) c->next->prev = n;
                 c->next = n;
-                c->size = need;
+                c->size = (uint32_t)need;
             }
             c->used = 1;
             heap_used += c->size;
+            if (heap_used > heap_peak)
+                heap_peak = heap_used;
             heap_free_bytes -= c->size;
             heap_allocs++;
             ret = (uint8_t *)c + HDR_SIZE;
+            /* canary at end of block (survives extra alignment padding) */
+            uint32_t *can = (uint32_t *)((uint8_t *)c + c->size - CANARY_SIZE);
+            *can = HEAP_CANARY;
             break;
         }
     }
@@ -559,6 +578,7 @@ void kfree(void *ptr) {
 
     unsigned long flags = spin_lock_irqsave(&heap_lock);
     if (b->magic != HEAP_MAGIC) {
+        heap_fail_magic++;
         spin_unlock_irqrestore(&heap_lock, flags);
         kprintf("kfree: bad magic\n");
         return;
@@ -568,16 +588,25 @@ void kfree(void *ptr) {
         kprintf("kfree: double free\n");
         return;
     }
+    /* payload size = block - header - canary */
+    if (b->size >= HDR_SIZE + CANARY_SIZE) {
+        uint32_t *can = (uint32_t *)((uint8_t *)b + b->size - CANARY_SIZE);
+        if (*can != HEAP_CANARY) {
+            heap_fail_canary++;
+            kprintf("kfree: canary corrupt (overflow?)\n");
+            /* still free to avoid permanent leak, but counted */
+        }
+    }
     b->used = 0;
     heap_used -= b->size;
     heap_free_bytes += b->size;
     heap_frees++;
-    if (b->next && !b->next->used) {
+    if (b->next && !b->next->used && b->next->magic == HEAP_MAGIC) {
         b->size += b->next->size;
         b->next = b->next->next;
         if (b->next) b->next->prev = b;
     }
-    if (b->prev && !b->prev->used) {
+    if (b->prev && !b->prev->used && b->prev->magic == HEAP_MAGIC) {
         b->prev->size += b->size;
         b->prev->next = b->next;
         if (b->next) b->next->prev = b->prev;
@@ -589,7 +618,8 @@ void *krealloc(void *ptr, size_t new_size) {
     if (!ptr) return kmalloc(new_size);
     if (!new_size) { kfree(ptr); return NULL; }
     struct heap_block *b = (struct heap_block *)((uint8_t *)ptr - HDR_SIZE);
-    size_t old = b->size - HDR_SIZE;
+    size_t old = (b->size > HDR_SIZE + CANARY_SIZE)
+               ? (b->size - HDR_SIZE - CANARY_SIZE) : 0;
     void *n = kmalloc(new_size);
     if (!n) return NULL;
     memcpy(n, ptr, old < new_size ? old : new_size);
@@ -600,19 +630,86 @@ void *krealloc(void *ptr, size_t new_size) {
 size_t kmalloc_usable_size(void *ptr) {
     if (!ptr) return 0;
     struct heap_block *b = (struct heap_block *)((uint8_t *)ptr - HDR_SIZE);
-    return b->magic == HEAP_MAGIC ? b->size - HDR_SIZE : 0;
+    if (b->magic != HEAP_MAGIC || b->size < HDR_SIZE + CANARY_SIZE)
+        return 0;
+    return b->size - HDR_SIZE - CANARY_SIZE;
 }
 
 void kmalloc_print_stats(void) {
     unsigned long flags = spin_lock_irqsave(&heap_lock);
     size_t total = heap_total, used = heap_used, freeb = heap_free_bytes;
-    size_t allocs = heap_allocs, frees = heap_frees;
+    size_t allocs = heap_allocs, frees = heap_frees, peak = heap_peak;
+    size_t outstanding = (allocs >= frees) ? (allocs - frees) : 0;
+    size_t fc = heap_fail_canary, fm = heap_fail_magic;
     spin_unlock_irqrestore(&heap_lock, flags);
 
-    kprintf("Heap: total=%dKB used=%dKB free=%dKB allocs=%d frees=%d\n",
+    kprintf("Heap: total=%dKB used=%dKB peak=%dKB free=%dKB\n",
             (uint32_t)(total / 1024), (uint32_t)(used / 1024),
-            (uint32_t)(freeb / 1024),
-            (uint32_t)allocs, (uint32_t)frees);
+            (uint32_t)(peak / 1024), (uint32_t)(freeb / 1024));
+    kprintf("      allocs=%d frees=%d outstanding=%d canary_fail=%d magic_fail=%d\n",
+            (uint32_t)allocs, (uint32_t)frees, (uint32_t)outstanding,
+            (uint32_t)fc, (uint32_t)fm);
+}
+
+/* Walk free list; return 0 if healthy, -1 if corruption found. */
+int heap_validate(void) {
+    if (!heap_root)
+        return -1;
+    unsigned long flags = spin_lock_irqsave(&heap_lock);
+    int rc = 0;
+    size_t seen = 0;
+    for (struct heap_block *c = heap_root; c; c = c->next) {
+        if (c->magic != HEAP_MAGIC) {
+            rc = -1;
+            break;
+        }
+        if (c->next && c->next->prev != c) {
+            rc = -1;
+            break;
+        }
+        seen += c->size;
+        if (seen > heap_total + PAGE_SIZE) { /* include guard slack */
+            rc = -1;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&heap_lock, flags);
+    return rc;
+}
+
+size_t kmalloc_outstanding(void) {
+    unsigned long flags = spin_lock_irqsave(&heap_lock);
+    size_t o = (heap_allocs >= heap_frees) ? (heap_allocs - heap_frees) : 0;
+    spin_unlock_irqrestore(&heap_lock, flags);
+    return o;
+}
+
+size_t kmalloc_peak(void) {
+    unsigned long flags = spin_lock_irqsave(&heap_lock);
+    size_t p = heap_peak;
+    spin_unlock_irqrestore(&heap_lock, flags);
+    return p;
+}
+
+
+/* Map physical MMIO range uncached. virt==phys for identity-style MMIO. */
+int vmm_map_mmio(uintptr_t phys, uintptr_t virt, size_t len) {
+    if (!len) return 0;
+    uintptr_t flags = PAGE_PRESENT | PAGE_WRITE | PAGE_PCD | PAGE_PWT;
+    uintptr_t p = phys & ~PAGE_SIZE_MASK;
+    uintptr_t v = virt & ~PAGE_SIZE_MASK;
+    uintptr_t end = phys + len;
+    while (p < end) {
+        if (vmm_map_page((void *)p, (void *)v, flags) != 0) {
+            /* On i386 identity only covers 0–1GB; high MMIO (e.g. LAPIC
+             * at 0xFEE00000) cannot be mapped. Treat as failure so callers
+             * (lapic_init) can fall back to UP. */
+            return -1;
+        }
+        p += PAGE_SIZE;
+        v += PAGE_SIZE;
+    }
+    return 0;
 }
 
 void memory_init(void) {

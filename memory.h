@@ -38,6 +38,8 @@ struct memory_map_entry {
 #define PAGE_WRITE     (1UL << 1)
 #define PAGE_USER      (1UL << 2)
 #define PAGE_HUGE      (1UL << 7)   /* 2MB (x86_64) or 4MB PSE (i386) */
+#define PAGE_PWT       (1UL << 3)   /* page-level write-through */
+#define PAGE_PCD       (1UL << 4)   /* page-level cache disable (MMIO) */
 #if defined(__x86_64__)
 #define PAGE_NX        (1ULL << 63) /* no-execute */
 #else
@@ -67,6 +69,8 @@ uint64_t pmm_get_free_frames(void);
 
 void  vmm_init(void);
 int   vmm_map_page(void* physical, void* virtual_addr, uintptr_t flags);
+/* Map a physical MMIO page uncached (PCD|PWT). Returns 0 on success. */
+int   vmm_map_mmio(uintptr_t phys, uintptr_t virt, size_t len);
 int   vmm_unmap_page(void* virtual_addr);
 int   vmm_unmap_and_free(void* virtual_addr);
 void* vmm_get_physical(void* virtual_addr);
@@ -80,6 +84,9 @@ void* krealloc(void* ptr, size_t new_size);
 void  kfree(void* ptr);
 size_t kmalloc_usable_size(void* ptr);
 void  kmalloc_print_stats(void);
+int   heap_validate(void);       /* 0 = ok, -1 = corrupt */
+size_t kmalloc_outstanding(void); /* allocs - frees */
+size_t kmalloc_peak(void);
 
 void memory_test(void);
 void memory_print_stats(void);

@@ -1,5 +1,4 @@
-/* test.h — Tiny test framework for TigxOS 1.2.1 */
-
+/* test.h — Test framework for TigxOS (1.2.8-update3) */
 #ifndef TEST_H
 #define TEST_H
 
@@ -18,6 +17,10 @@ void test_begin(struct test_ctx *t, const char *name);
 void test_check(struct test_ctx *t, int cond, const char *what);
 void test_note(struct test_ctx *t, const char *fmt, ...);
 void test_end(struct test_ctx *t);
+
+/* Soft check: records a note on failure but still counts as a check.
+ * Use for environment-dependent assertions (e.g. multi-CPU only on -smp N). */
+void test_check_soft(struct test_ctx *t, int cond, const char *what);
 
 int  test_tick_delta_ok(uint32_t got, uint32_t want, uint32_t tol_pct);
 
@@ -42,7 +45,10 @@ void test_suite_irq(void);
 void test_suite_rtc(void);
 void test_suite_gdt(void);
 void test_suite_aspace(void);
+void test_suite_sched(void);
 void test_suite_ramfs(void);
 void test_suite_regression(void);
+void test_suite_smp(void);      /* new: LAPIC / SMP foundation */
+void test_suite_atomic(void);   /* new: atomic.h primitives */
 
 #endif /* TEST_H */

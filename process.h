@@ -9,6 +9,11 @@
 struct address_space;
 
 #define MAX_PROCESSES 16
+#define NCPU_MAX      16   /* SMP-ready layout; only CPU 0 online until 1.2.8 */
+#define PRIO_MIN       0
+#define PRIO_MAX       3
+#define PRIO_DEFAULT   1
+#define PRIO_IDLE      0   /* idle task only */
 #define PROCESS_STACK_SIZE (16*1024)
 #define PROCESS_NAME_LEN 32
 #define MAX_FDS 16
@@ -45,13 +50,17 @@ struct process {
     uintptr_t *user_stack_base;
     int is_user;
     int time_slice;
+    int priority;          /* PRIO_MIN..PRIO_MAX; higher runs first */
     uint32_t wake_tick;
+    uint32_t ticks_ran;     /* accounting for fairness tests */
+    int on_cpu;            /* cpu id that last ran this task, or -1 */
     int parent_pid;
     int wait_pid;
     int exit_status;
     struct file_desc fds[MAX_FDS];
     struct address_space *as;
     uintptr_t heap_brk;   /* user heap break (SYS_BRK); 0 = not started */
+    uintptr_t heap_limit; /* max bytes above USER_HEAP_BASE (0 = USER_HEAP_LIMIT) */
     char cwd[PATH_MAX];   /* current working directory (absolute path string) */
 };
 
@@ -78,6 +87,20 @@ void process_yield(void);
 void schedule(void);
 void scheduler_tick(void);
 void scheduler_start(void);
+int  scheduler_is_enabled(void);
+int  process_set_priority(int pid, int prio);
+int  process_get_priority(int pid);
+void process_reset_ticks(void); /* zero ticks_ran for all */
+/* Per-CPU (1.2.3): layout for SMP; only CPU 0 is online today. */
+struct cpu_data {
+    int             id;
+    int             online;
+    struct process *cur;     /* current process on this CPU */
+    uint64_t        switches;
+    uint64_t        ticks;
+};
+struct cpu_data *cpu_this(void);
+int              cpu_count_online(void);
 struct process *process_current(void);
 struct process *process_lookup_pid(int pid);
 int  process_count(void);

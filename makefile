@@ -8,7 +8,7 @@
 
 ASM=nasm
 GLC=python3 lizard/glc.py
-VERSION := $(shell sed -n 's/.*TIGX_VERSION "\(.*\)"/\1/p' version.h)
+VERSION := 1.2.8-update5
 GL_PROGS = hello echo loop cat rm ls wc writefile lang65 exitn cp mv touch head clear tee sleep basename dirname typed arrdemo strlib importdemo
 GL_ELFS  = $(GL_PROGS:%=user/%.gl.elf)
 CC=gcc
@@ -28,12 +28,12 @@ endif
 
 KERNEL_OBJS=entry.o interrupt.o switch.o console.o interrupt_c.o keyboard.o timer.o rtc.o \
 	memory.o string.o process.o filetable.o disk.o fs.o vfs.o ramfs.o spinlock.o wait.o sync.o font.o font_data.o \
-	gdt.o syscall.o pipe.o aspace.o elf.o embed_hello.o test.o tests.o kernel.o
+	gdt.o syscall.o pipe.o aspace.o elf.o embed_hello.o test.o tests.o log.o acpi.o lapic.o smp.o kernel.o
 
 # Only the shell is still embedded in the kernel image (init). All other
 # user programs live on the TigFS image produced by tools/mktigfs.py.
 # 256 sectors ≈ 128 KB — comfortable headroom for shell + kernel code.
-KERNEL_SECTS=320
+KERNEL_SECTS=384
 KERNEL_MAX_BYTES=$(shell echo $$(( $(KERNEL_SECTS) * 512 )))
 TIGFS_OFFSET=$$((512 * 512))   # LBA 512 in bytes
 
@@ -102,7 +102,7 @@ user/args.elf: user/crt0.o user/libc.o user/args.o $(USER_LD)
 	$(CC) $(USER_CFLAGS) -T $(USER_LD) -o $@ user/crt0.o user/libc.o user/args.o
 
 # C userland utilities (1.1.7 editor + 1.1.8 system info)
-C_UTILS = edit date uptime uname free df sysinfo ps kill top
+C_UTILS = edit date uptime uname free df sysinfo ps kill top dmesg
 C_UTILS_ELFS = $(C_UTILS:%=user/%.elf)
 
 user/%.o: user/%.c user/libc.h
@@ -138,8 +138,8 @@ tigfs.img: $(GL_ELFS) user/shell.elf user/args.elf $(C_UTILS_ELFS) tools/mktigfs
 	  args.elf:user/args.elf \
 	  bin/args.elf:user/args.elf 	  $(foreach p,$(C_UTILS),bin/$(p).elf:user/$(p).elf)
 
-boot.bin: $(ARCH_DIR)/boot.asm
-	$(ASM) -f bin $< -o $@
+boot.bin: $(ARCH_DIR)/boot.asm makefile
+	$(ASM) -f bin -dKERNEL_SECTS=$(KERNEL_SECTS) $< -o $@
 
 entry.o: $(ARCH_DIR)/entry.asm
 	$(ASM) -f $(ASM_ELF) $< -o $@
@@ -181,18 +181,26 @@ run-64:
 	$(MAKE) ARCH=x86_64 run
 
 # Headless automated test run (isa-debug-exit). Exit status:
-#   0 → all suites passed
-#   1 → one or more checks failed (or QEMU crash / timeout)
+#   QEMU rc 1 → all suites passed (qemu_exit(0) → (0<<1)|1)
+#   QEMU rc 3 → one or more checks failed (qemu_exit(1))
+#   timeout 124 → hung (no isa-debug-exit within 35s)
 test-qemu: os-image.bin
 	@echo "=== test-qemu ARCH=$(ARCH) ==="
-	$(QEMU) -m 128 \
-	  -display none -serial stdio \
+	@rm -f test-$(ARCH).log
+	@echo "  launching: $(QEMU) -m 128 -smp 1 -nographic + isa-debug-exit"
+	@set +e; \
+	timeout --foreground -k 5 35 $(QEMU) -m 128 -smp 1 \
+	  -nographic \
 	  -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 	  -drive file=os-image.bin,format=raw,if=ide,index=0,media=disk \
-	  ; rc=$$?; \
-	  if [ $$rc -eq 1 ]; then echo "PASS (QEMU status 1)"; exit 0; \
-	  elif [ $$rc -eq 3 ]; then echo "FAIL (QEMU status 3)"; exit 1; \
-	  else echo "UNEXPECTED QEMU status $$rc"; exit 1; fi
+	  > test-$(ARCH).log 2>&1; \
+	rc=$$?; \
+	echo "  QEMU finished rc=$$rc"; \
+	cat test-$(ARCH).log; \
+	if [ $$rc -eq 1 ]; then echo "RESULT ARCH=$(ARCH) PASS"; exit 0; \
+	elif [ $$rc -eq 3 ]; then echo "RESULT ARCH=$(ARCH) FAIL"; exit 1; \
+	elif [ $$rc -eq 124 ]; then echo "RESULT ARCH=$(ARCH) TIMEOUT"; exit 1; \
+	else echo "RESULT ARCH=$(ARCH) UNEXPECTED rc=$$rc"; exit 1; fi
 
 test-qemu-32:
 	$(MAKE) ARCH=i386 TESTS=1 test-qemu

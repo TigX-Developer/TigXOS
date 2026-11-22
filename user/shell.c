@@ -304,7 +304,7 @@ static void collect_matches(const char *prefix, char out[][28], int *nout, int m
     *nout = 0;
     /* builtins + shell keywords worth completing */
     static const char *builtins[] = {
-        "help", "exit", "quit", "halt", "shutdown", "poweroff",
+        "help", "exit", "quit", "halt", "shutdown", "poweroff", "reboot",
         "pid", "true", "false", "set", "export", "unset", "env",
         "cd", "pwd", "sh", "jobs", "fg", "wait", "kill",
         "test", "alias", "unalias", "history",
@@ -469,12 +469,12 @@ static int readline(char *buf, int max) {
         if (r < 0)
             return -1;
         if (r == 0)
-            break;
+            return -2;   /* EOF — not an empty line */
 
         if (c == '\r' || c == '\n') {
             write(STDOUT_FILENO, "\n", 1);
             buf[len] = 0;
-            return len;
+            return len;  /* 0 = empty line, still valid */
         }
 
         /* --- navigation / editing specials --- */
@@ -2002,8 +2002,18 @@ static int run_one(char **argv, int argc, int background) {
             return 1;
         }
         shell_puts("Halting...\n");
-        halt();
+        poweroff();   /* ACPI path (falls back to QEMU ports) */
         return 0; /* not reached */
+    }
+
+    if (strcmp(argv[0], "reboot") == 0) {
+        if (background) {
+            shell_puts("reboot: cannot background\n");
+            return 1;
+        }
+        shell_puts("Rebooting...\n");
+        reboot();
+        return 0;
     }
 
     if (strcmp(argv[0], "exit") == 0 || strcmp(argv[0], "quit") == 0) {
@@ -2241,15 +2251,19 @@ int main(int argc, char **argv) {
         jobs_reap_done();
         prompt();
         int n = readline(line, LINE_MAX);
+        if (n == -2) {
+            /* true EOF on stdin */
+            shell_puts("\n");
+            return 0;
+        }
         if (n < 0) {
             /* hard read error — brief pause, retry */
             sleep_ms(50);
             continue;
         }
         if (n == 0) {
-            /* EOF on stdin: exit cleanly instead of spinning */
-            shell_puts("\n");
-            return 0;
+            /* empty line (user pressed Enter) — just re-prompt */
+            continue;
         }
         hist_add(line);
         execute_line(line);

@@ -18,9 +18,12 @@
 #define USER_STACK_BASE      (USER_STACK_TOP - USER_STACK_SIZE)
 #define USER_STACK_GUARD     (USER_STACK_BASE - PAGE_SIZE)
 
-/* User heap grows up from USER_HEAP_BASE toward the stack guard. */
+/* User heap grows up from USER_HEAP_BASE toward the stack guard page.
+ * USER_HEAP_MAX is the exclusive ceiling (stack guard page is unmapped).
+ * USER_HEAP_LIMIT is the default per-process soft cap (SYS_BRK). */
 #define USER_HEAP_BASE       0x02000000UL
-#define USER_HEAP_MAX        (USER_STACK_GUARD)  /* do not meet the stack */
+#define USER_HEAP_MAX        (USER_STACK_GUARD)  /* exclusive; guard page below stack */
+#define USER_HEAP_LIMIT      (4UL * 1024 * 1024) /* 4 MB default per process */
 
 #define ASPACE_MAX_PAGES     512
 #define ASPACE_MAX_TABLES    64             /* intermediate PT/PD frames to free */
@@ -49,6 +52,7 @@ int aspace_user_range_ok(struct address_space *as, uintptr_t addr, size_t len);
 int aspace_user_range_writable(struct address_space *as, uintptr_t addr, size_t len);
 uintptr_t aspace_virt_to_phys(struct address_space *as, uintptr_t virt);
 void aspace_switch(struct address_space *as);
+void aspace_tlb_flush_page(uintptr_t page); /* SMP TLB shootdown */
 struct address_space *aspace_kernel(void);
 
 /* Map USER_STACK_PAGES contiguous frames at USER_STACK_BASE; guard left empty.

@@ -4,6 +4,7 @@
 
 #include "interrupt.h"
 #include "console.h"
+#include "log.h"
 #include "io.h"
 #include "process.h"
 #include "string.h"
@@ -156,6 +157,17 @@ void pic_send_eoi(uint8_t irq) {
  */
 void panic_render(const char *reason, struct interrupt_frame *frame) {
     /*
+     * Recursion guard: a second fault while already panicking just halts.
+     * This prevents the classic "panic crashes and reboots" loop.
+     */
+    if (panicking) {
+        __asm__ volatile("cli" ::: "memory");
+        for (;;)
+            __asm__ volatile("hlt");
+    }
+    panicking = 1;
+
+    /*
      * cli FIRST. Hardware exceptions already have IF=0 (interrupt gate),
      * but kernel_panic() is called from ordinary kernel code with IRQs on.
      * A timer tick mid-render would preempt the panic screen itself.
@@ -267,7 +279,30 @@ void panic_render(const char *reason, struct interrupt_frame *frame) {
         P("\n");
     }
 
-    /* 6. Footer — stay halted so the message can be read */
+    /* 6. Approximate stack backtrace */
+    {
+        void *fp = NULL;
+#if defined(__x86_64__)
+        __asm__ volatile("mov %%rbp, %0" : "=r"(fp));
+#elif defined(__i386__)
+        __asm__ volatile("mov %%ebp, %0" : "=r"(fp));
+#endif
+        if (fp)
+            log_stack_trace(fp, 12);
+        else if (frame) {
+#if defined(__x86_64__)
+            log_stack_trace((void *)(uintptr_t)frame->rbp, 12);
+#else
+            log_stack_trace((void *)(uintptr_t)frame->ebp, 12);
+#endif
+        }
+    }
+
+    /* 7. Recent kernel log (backend view) */
+    P("\n");
+    log_dump_recent(16);
+
+    /* 8. Footer — stay halted so the message can be read */
     P("System halted.\n");
 
     #undef P

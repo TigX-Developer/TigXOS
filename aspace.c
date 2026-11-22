@@ -4,6 +4,7 @@
  */
 
 #include "aspace.h"
+#include "smp.h"
 #include "console.h"
 #include "string.h"
 #include "arch/arch.h"
@@ -282,7 +283,12 @@ int aspace_user_range_writable(struct address_space *as, uintptr_t addr, size_t 
     return 1;
 }
 
+void aspace_tlb_flush_page(uintptr_t page) {
+    smp_tlb_shootdown(page);
+}
+
 void aspace_switch(struct address_space *as) {
+
     if (!as || !aspace_ready) return;
     if (current_as == as) return;
     arch_write_cr3(as->cr3);

@@ -6,6 +6,7 @@
 #include "process.h"
 #include "interrupt.h"
 #include "console.h"
+#include "spinlock.h"
 #include "io.h"
 #include "wait.h"
 #include <stdint.h>
@@ -197,16 +198,16 @@ static void keyboard_flush_leds(void) {
  */
 char keyboard_getchar(void) {
     for (;;) {
-        __asm__ volatile("cli");
+        unsigned long flags = irq_save();
         if (buffer_head != buffer_tail) {
             char c = keyboard_buffer[buffer_tail];
             buffer_tail = (buffer_tail + 1) % 256;
-            __asm__ volatile("sti");
+            irq_restore(flags);
             return c;
         }
         /* wait_queue_block returns with IF=0; allow IRQs between polls */
         wait_queue_block(&kbd_waitq, 0);
-        __asm__ volatile("sti");
+        irq_restore(flags);  /* flags had IF=0; this is a no-op but keeps pairing */
         /* Buffer may still be empty if woken spuriously; loop. */
         keyboard_flush_leds();
     }

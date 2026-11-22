@@ -1,5 +1,334 @@
 # TigxOS changelog
 
+## 1.2.9 — SMP completion (IPI, TLB shootdown, balance hooks)
+
+Cross-core infrastructure on top of 1.2.8 AP bring-up.
+
+### IPI
+- Vectors IPI_VECTOR_TLB (0xFC) and IPI_VECTOR_RESCHED (0xFD)
+- smp_send_resched / smp_send_resched_all; self path sets need_resched without ICR
+
+### TLB
+- smp_tlb_shootdown / smp_tlb_shootdown_all + aspace_tlb_flush_page
+- Bounded ACK wait so parked APs cannot hang the BSP
+
+### Scheduler
+- cpu_this()/current use smp_cpu_id(); timer respects need_resched
+- Soft rq depth hints for future steal
+
+### Limits
+- APs still park after SIPI (no long-mode AP entry yet); i386 stays UP
+
+### GitHub
+- Root LICENSE (MIT) included
+
+
+## 1.2.8-update5 — pipe test hang + make test TIMEOUT
+
+### Fix
+- **`test_suite_pipe` cross-task path hung** under `make test` (TIMEOUT after
+  `pipe_alloc succeeds`). The reader was spawned first and blocked on an empty
+  pipe; depending on schedule order the writer never completed the transfer
+  cleanly within the timeout window.
+- Rewrite: **write data first**, then spawn the reader (no empty-pipe block).
+  Bounded yield+sleep wait for completion; kill leftover reader if needed.
+- `test-qemu` timeout **25 s → 35 s** for slower hosts (still far under the
+  old multi-second sleep budget).
+
+### Notes
+- `version.h` / makefile → **1.2.8-update5**
+
+## 1.2.8-update4 — faster make test
+
+### Speed
+- Timer suite: 6 sleeps (10..500 ms) → 3 sleeps (10, 50, 100 ms). Same coverage,
+  ~700 ms less wall time per arch.
+- Sched fairness / priority windows: 200+150 ms → 80+60 ms; cleanup uses yield +
+  occasional 5 ms instead of 100×10 ms.
+- Process / regression / waitq / pipe reclaim loops: yield-first with sparse
+  5 ms sleeps (was up to 200×10 ms = 2 s each).
+- `test-qemu` timeout 40 s → 25 s (tests finish well under that).
+
+### Notes
+- Still **266-ish checks**, both arches green.
+- `version.h` / makefile → **1.2.8-update4**
+
+## 1.2.8-update3 — SMP + test rewrite
+
+### SMP / LAPIC (robustness)
+- **`lapic_init`**: i386 still skips entirely; on x86_64 a version probe fails closed
+  (nonsense `ver` → stay UP). ICR waits are bounded with `pause`. INIT/SIPI delays
+  use `pause` instead of empty loops.
+- **`smp_init`**: every early-exit path leaves `smp_online = 1`. Mailbox wait is
+  shorter and bounded. New query APIs: `smp_apic_id`, `smp_is_bsp`, `smp_max_cpus`,
+  `smp_ap_started`.
+- Trampoline layout documented; GDTR/GDT offsets fixed and fenced with `mfence`.
+
+### Tests
+- New suite **`atomic`**: xchg, cmpxchg, inc/dec, add_fetch, load/store, stress
+  loop, spin_trylock smoke.
+- New suite **`smp`**: CPU count / id / BSP, cpu_data layout, LAPIC presence
+  (hard on i386, soft on x86_64), switch-counter monotonicity.
+- Framework: `test_check_soft` for environment-dependent asserts (never fails the
+  suite).
+- Boot-test mode still skips the interactive shell (avoids FS races).
+- `test-qemu`: `-nographic -smp 1`, `timeout --foreground -k 5 40`.
+
+### Notes
+- `version.h` / makefile → **1.2.8-update3**
+- Full cross-core scheduling remains 1.2.9.
+
+## 1.2.8-update2 — i386 make test hang (LAPIC map)
+
+### Critical fix
+- **`vmm_map_mmio()` always returned 0**, even when `vmm_map_page` failed.
+  On i386 the LAPIC (0xFEE00000) is outside the 0–1GB identity map, so the
+  map fails, but lapic_init still wrote through the unmapped pointer and
+  triple-faulted / hung before any further serial output. That made
+  `make test` (which starts with ARCH=i386) appear to hang after the
+  "=== test-qemu ARCH=i386 ===" line.
+- `vmm_map_mmio` now returns -1 on map failure.
+- **`lapic_init()` now returns immediately on i386** (no map attempt, no
+  pointer dereference). An early `#if defined(__i386__)` makes the skip
+  unconditional and removes any chance of a page-fault during LAPIC probe.
+- `make test` / `test-qemu` hardened: `-nographic -smp 1`,
+  `timeout --foreground -k 5 40`, prints the QEMU command and its exit
+  code so a hang is reported as TIMEOUT instead of an infinite wait.
+
+### Notes
+- Behaviour on x86_64 unchanged.
+- `version.h` / makefile → **1.2.8-update2**
+
+## 1.2.8-update1 — SMP foundation polish + wiring
+
+Critical fix and hardening of the 1.2.8 SMP foundation.
+
+### Critical fix
+- **`acpi_init()`, `lapic_init()`, `smp_init()` were never called from `kmain`.**
+  The code existed but the boot path skipped it entirely. They are now called
+  in the correct order (ACPI early after memory, LAPIC + SMP after process_init
+  so `smp_mark_online` can update `cpu_data[]`).
+
+### Fix (keyboard + test hang)
+- **LINT0 was masked** after enabling the local APIC. That cut the 8259 PIC
+  virtual-wire path, so timer and keyboard IRQs stopped. LINT0 is now set to
+  ExtINT (0x700) so PIC IRQs keep working on the BSP.
+- `make test` / `test-qemu` now runs under `timeout 45` and reports TIMEOUT
+  instead of hanging forever if isa-debug-exit never fires.
+- `ap_main` marked `__attribute__((unused))` (trampoline parks in asm until 1.2.9).
+
+### Extra checks
+- `smp_init`: reject missing ACPI, clamp `cpu_count` to `NCPU_MAX`, log every
+  MADT CPU entry, clear `ap_ready`/`smp_logical`, validate trampoline address,
+  `mfence` around mailbox + trampoline, `pause` in the wait loop, report
+  attempted vs online count.
+- `lapic_init`: LINT0 ExtINT; version probe where applicable.
+- i386 path still gracefully stays UP when LAPIC cannot be mapped.
+
+### Notes
+- Behaviour is unchanged for single-CPU / i386; on x86_64 + `qemu -smp N`
+  the APs should now actually answer in dmesg.
+- Still foundation only: APs park in the trampoline `hlt`; no cross-core
+  scheduling until 1.2.9.
+- `version.h` → **1.2.8-update1**
+
+## 1.2.8 — SMP foundation
+
+Bring-up of the Local APIC and application processors. Only the BSP schedules;
+cross-core scheduling is 1.2.9.
+
+### MMIO
+- `PAGE_PCD` / `PAGE_PWT` flags
+- `vmm_map_mmio()` for uncached device mappings (LAPIC)
+
+### LAPIC
+- Map and enable the local APIC on the bootstrap CPU
+- `lapic_id()`, `lapic_eoi()`, `lapic_send_ipi()`, `lapic_start_ap()`
+- Spurious vector enabled; LINT/timer masked (PIC still owns IRQs)
+
+### AP startup
+- Real-mode trampoline at 0x8000 (INIT + SIPI + SIPI)
+- Shared mailbox so APs signal readiness
+- BSP waits ~1s per AP; reports how many answered
+- APs park in `hlt` (no scheduling yet)
+
+### Per-CPU
+- `NCPU_MAX` already 16
+- `smp_mark_online()` updates `cpu_data[].online`
+- `smp_cpu_count()` / `smp_cpu_id()`
+
+### Notes
+- i386: LAPIC sits above the 1GB identity map — SMP bring-up is best on x86_64 for now
+- `qemu -smp 4` should show multiple CPUs answering in `dmesg`
+- `version.h` → **1.2.8**
+
+
+## 1.2.7-update1 — POSIX test harness fix\n\n- `make test` no longer uses bash-only `${PIPESTATUS}` (breaks under `/bin/sh`/dash).\n\n## 1.2.7 — Test harness + locking audit
+
+Preparation for SMP (1.2.8). No functional user-visible changes beyond cleaner internals.
+
+### Atomics & documentation
+- New **`atomic.h`**: `atomic_xchg`, `atomic_cmpxchg`, `atomic_inc/dec`, `atomic_add_fetch`
+- New **`LOCKING.md`**: lock order rules and which structures must be locked
+- **`NCPU_MAX` raised to 16** (only CPU 0 online until 1.2.8)
+
+### cli/sti cleanup
+- **`sys_spawn`**: home-made `spawn_busy` + raw cli/sti replaced with a real `spawn_lock` spinlock
+- **`keyboard_getchar`**: uses `irq_save` / `irq_restore`
+- **`timer_sleep_ms`**: uses `irq_save` / `irq_restore`
+- Remaining raw cli/sti only in: spinlock internals, panic, idle/hlt, final scheduler sti
+
+### Test harness
+- `make test` writes `test-<arch>.log`
+- Machine-readable `RESULT ARCH=… PASS|FAIL` lines
+
+### Notes
+- `version.h` → **1.2.7**
+- Full locking of every shared structure continues into 1.2.8 as needed
+
+
+## 1.2.6 — ACPI (tables, poweroff/reboot, MADT)
+
+ACPI discovery and clean power control. Foundation for SMP (1.2.8).
+
+### Tables
+- RSDP scan (EBDA + 0xE0000–0xFFFFF), checksum verified
+- RSDT / XSDT walk with per-table checksums
+- **FADT**: PM1a/b control ports, reset register, DSDT pointer
+- **_S5_** sleep-type values extracted from DSDT with a tiny AML scan (no full parser)
+- **MADT**: local APIC address, CPU APIC IDs + enabled flags, I/O APICs, IRQ overrides
+- `dmesg` shows e.g. `acpi: 4 CPU(s) ready for SMP`
+
+### Power
+- `acpi_poweroff()`: SLP_TYPx|SLP_EN via PM1_CNT, then QEMU/Bochs/VBox ports
+- `acpi_reboot()`: ACPI reset register → keyboard 0xFE → triple-fault
+- New syscalls **SYS_POWEROFF (27)** and **SYS_REBOOT (28)**
+- Shell builtins `poweroff` / `halt` / `shutdown` and **`reboot`**
+- `sys_halt` now uses the ACPI path
+
+### Notes
+- No CPUs are started yet (that is 1.2.8)
+- `TIGX_SYSCALL_ABI` stays 1 (additive)
+- `version.h` → **1.2.6**
+
+
+## 1.2.5-update5 — fix putchar newline comparison warning
+
+- Fixed `c == "\n"` (string) → `c == '\n'` (char) in the kprintf→ring line accumulator. Removes the -Waddress warnings.
+
+## 1.2.5-update4 — final logging / panic hardening (no version bump)
+
+- **Every `kprintf` line** is now copied into the dmesg ring (via putchar line accumulator + `log_ring_raw`), with a recursion guard so klog ↔ kprintf cannot loop.
+- **Absolute sequence counters**: `log_read` takes an ever-increasing byte offset; wrap no longer causes repeated/skipped lines.
+- **Panic safety**:
+  - `panicking` flag — a second fault just `hlt`s (no recursive crash/reboot).
+  - `log_dump_recent` uses `spin_trylock` (never blocks if the lock was held by the faulting context).
+  - Stack walk validates alignment + address range and caps at 12 frames.
+- `%lu` / `%llu` supported in `klog`.
+- Messages before `log_init` are still dropped (init remains after timer/IDT).
+
+
+## 1.2.5-update2 — log crash/loop fix
+- **`log_dump_recent`**: no longer allocates 16 KiB on the kernel stack (same size as the stack → overflow → fault/panic loop). Uses a static buffer and prints in small chunks.
+- **`ring_put`**: clearer length accounting when the ring wraps.
+
+
+## 1.2.5 — Logging (`dmesg` ring buffer, levels, panic stack + log view)
+
+Kernel logging infrastructure for diagnostics and the backend log view.
+
+### Ring buffer
+- 16 KiB circular `dmesg` buffer (`log.c` / `log.h`)
+- Records every `klog` / `pr_*` line with tick timestamp and level tag
+- Survives console scroll; readable after the fact
+
+### Log levels
+- `LOG_EMERG` … `LOG_DEBUG` (0–7)
+- Console filter via `log_set_console_level` (default `LOG_INFO`)
+- Macros: `pr_emerg` / `pr_err` / `pr_warn` / `pr_info` / `pr_debug` …
+
+### User interface
+- New syscall **`SYS_DMESG` (26)** — additive ABI extension (numbers 0–25 unchanged)
+- User tool **`dmesg`** (`bin/dmesg.elf`) reads the ring and prints it
+- libc wrapper `dmesg(buf, len, off)`
+
+### Panic improvements
+- Approximate stack backtrace (frame-pointer walk when available)
+- Recent log lines dumped on the panic screen (backend log view)
+- Still dual-output to VGA + serial
+
+### Notes
+- `TIGX_SYSCALL_ABI` remains 1 (additive only)
+- `version.h` → **1.2.5**
+- Test suite updated: `SYS_MAX` / `SYS_DMESG` assertions match the new number 26
+
+
+## 1.2.4 — Syscall cleanup (stable ABI)
+Frozen numbered syscall ABI with versioning and stricter argument checks.
+
+### ABI
+- Numbers 0–25 frozen; **do not renumber** existing calls
+- New `SYS_ABI_VERSION` (25) returns `TIGX_SYSCALL_ABI` (currently 1)
+- `version.h` exposes `TIGX_VERSION` 1.2.4 and `TIGX_SYSCALL_ABI`
+- Unknown syscall numbers return `-ENOSYS` (no console spam)
+
+### Argument checks
+- `sys_write` / `sys_read`: bad fd → `-EBADF`, bad user range → `-EFAULT`, len > 1 MiB → `-EINVAL`
+- `sys_open`: null path → `-EINVAL`
+- `sys_close`: bad fd → `-EBADF`
+- Shared negative codes: `SY_ENOSYS`, `SY_EINVAL`, `SY_EFAULT`, `SY_EBADF`, `SY_ENOMEM`
+
+### Theme
+- Console semantic palette shifted to **orange on black** (brand orange = VGA yellow/brown)
+- Boot banner boxed with orange frame
+
+### Tests
+- Syscall suite extended: ABI number, `SYS_MAX`, error constants, version constant
+
+### Scheduler carry-over (from 1.2.3 fixes)
+- `schedule()` marks current READY before `pick_next` so high-prio tasks can continue
+- Priority stress test keeps the runner at `PRIO_MAX` so it can wake under strict priority
+
+
+## 1.2.3 — Scheduler (expanded, SMP-ready)
+SMP-aware scheduling foundations while still running on one CPU (full SMP is 1.2.8/1.2.9).
+
+### Priorities
+- Each process has `priority` in `PRIO_MIN..PRIO_MAX` (default `PRIO_DEFAULT`, idle = `PRIO_IDLE`)
+- `pick_next()` selects highest ready priority; round-robin within the same level
+- `process_set_priority` / `process_get_priority` (idle priority is fixed)
+
+### Per-CPU layout
+- `struct cpu_data` with `current`, switch/tick counters, `online` flag
+- `cpu_this()` / `cpu_count_online()` — only CPU 0 is online until 1.2.8
+- Process accounting: `ticks_ran`, `on_cpu`
+
+### Lock discipline
+- `sched_lock` spinlock reserved for table/run-queue (uniprocessor still uses IF=0 in IRQ paths)
+- `process_yield` and `process_wait` block paths use `irq_save` / `irq_restore` instead of raw `cli`/`sti`
+
+### Tests
+- New suite **`sched`**: per-CPU layout, priority get/set, equal-priority fairness, high-vs-low preference
+
+
+## 1.2.2 — Memory: allocator audit, guards, leak tracking, user limits
+
+### Kernel heap
+- **Canary** after every `kmalloc` payload (`0xC0FFEE42`); checked on `kfree`
+- **Guard page**: last 4 KB of the heap frame region is never allocated
+- **Leak tracking**: `allocs` / `frees` / **outstanding**, plus **peak** used bytes
+- **`heap_validate()`**: walks the block list (magic + link integrity)
+- Stats print includes peak, outstanding, canary/magic failure counts
+
+### User heap (SYS_BRK)
+- **`USER_HEAP_LIMIT`** (4 MB default) per process
+- `process.heap_limit` enforced in `sys_brk` (growth beyond limit → `-1`)
+- Stack **guard page** still exclusive ceiling (`USER_HEAP_MAX`)
+
+### Tests
+- memory suite: validate, outstanding, peak, canary-sized free
+
+
 ## 1.2.1-tests — Expanded make test suites
 
 - **17 suites / ~177 checks** via `make test` (both arches)

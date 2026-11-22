@@ -32,22 +32,29 @@
 #define VGA_WHITE_ON_BLACK    VGA_ATTR(VGA_WHITE, VGA_BLACK)
 #define VGA_ORANGE_ON_BLUE    VGA_ATTR(VGA_YELLOW, VGA_BLUE)
 
-/* --- TigxOS 1.1.12 semantic palette --- */
+/* --- TigxOS theme: Orange on Black (1.2.4) ---
+ * VGA text mode has no RGB (#F28C28). Closest true orange is BROWN
+ * (palette ~#AA5500). YELLOW is reserved for rare bright highlights only.
+ */
 #define TIG_BG           VGA_BLACK
-#define TIG_FG           VGA_LGRAY
+#define TIG_FG           VGA_WHITE
 
-#define TIG_HEADER       VGA_LCYAN
-#define TIG_SUBHEADER    VGA_CYAN
-#define TIG_BRAND_A      VGA_YELLOW    /* "Tig" and "OS" */
-#define TIG_BRAND_B      VGA_WHITE     /* "x" */
+#define TIG_ORANGE       VGA_BROWN     /* primary brand orange (~#AA5500) */
+#define TIG_ORANGE_DIM   VGA_BROWN
+#define TIG_ORANGE_BRIGHT VGA_YELLOW   /* bright accent only */
+
+#define TIG_HEADER       VGA_BROWN     /* section headers — orange */
+#define TIG_SUBHEADER    VGA_BROWN
+#define TIG_BRAND_A      VGA_BROWN     /* "Tig" / "OS" in orange */
+#define TIG_BRAND_B      VGA_WHITE     /* "x" stays white */
 #define TIG_OK           VGA_LGREEN
 #define TIG_FAIL         VGA_LRED
-#define TIG_WARN         VGA_YELLOW
-#define TIG_INFO         VGA_WHITE
+#define TIG_WARN         VGA_BROWN     /* warnings in orange, not lemon */
+#define TIG_INFO         VGA_WHITE     /* body text — bright */
 #define TIG_DIM          VGA_DGRAY
-#define TIG_METRIC       VGA_LMAGENTA
-#define TIG_ACCENT       VGA_LBLUE
-#define TIG_PROMPT       VGA_YELLOW
+#define TIG_METRIC       VGA_BROWN
+#define TIG_ACCENT       VGA_BROWN
+#define TIG_PROMPT       VGA_BROWN
 
 #define TIG_ATTR_OK      VGA_ATTR(TIG_OK,     TIG_BG)
 #define TIG_ATTR_FAIL    VGA_ATTR(TIG_FAIL,   TIG_BG)
