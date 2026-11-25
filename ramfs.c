@@ -1,4 +1,4 @@
-/* ramfs.c — simple RAM disk for /tmp (TigxOS 1.2.1)
+/* ramfs.c — simple RAM disk for /tmp (TigxOS 1.3.8)
  *
  * Flat-ish hierarchy under a fixed root inode. Files hold up to
  * RAMFS_MAX_FILE bytes from a shared data pool. Directories keep a

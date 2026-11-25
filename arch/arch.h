@@ -61,6 +61,9 @@ static inline uintptr_t arch_read_cr2(void)
 #define ARCH_BOOT_MEMMAP_DATA    ((void *)0x9004)
 #define ARCH_BOOT_PAGE_ROOT      ((void *)0x1000)   /* PML4 (64) or PD (32) */
 
+/* VBE linear-framebuffer handoff written by boot.asm before protected mode */
+#define ARCH_BOOT_FB_INFO        ((volatile void *)0x9800)
+
 /* Kernel load address / entry (matches linker.ld and boot.asm) */
 #define ARCH_KERNEL_OFFSET       0x10000UL
 

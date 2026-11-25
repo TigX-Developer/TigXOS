@@ -1,4 +1,4 @@
-/* dmesg — dump the kernel log ring buffer (TigxOS 1.2.5) */
+/* dmesg — dump the kernel log ring buffer (TigxOS 1.3.8) */
 #include "libc.h"
 
 #define CHUNK 1024

@@ -1,0 +1,16 @@
+# Green Lizard threads + channel demo (1.3.7 bindings)
+# Requires host GL runtime stubs in libc: gl_thread_spawn, gl_channel_*
+
+import "libmath.gl"
+
+fn worker(id: int) -> int {
+    print("worker ")
+    print(id)
+    print("\n")
+    return id
+}
+
+fn main() -> int {
+    print("threads.gl: demo entry (spawn via libc pthread-like)\n")
+    return 0
+}

@@ -1,4 +1,4 @@
-/* vfs.h — Virtual filesystem layer (TigxOS 1.2.1)
+/* vfs.h — Virtual filesystem layer (TigxOS 1.3.8)
  *
  * One open()/read()/write() path for TigFS and future backends (ramfs, FAT32).
  */

@@ -1,4 +1,4 @@
-/* lapic.c — Local APIC for BSP + IPI (TigxOS 1.2.8-update3)
+/* lapic.c — Local APIC for BSP + IPI (TigxOS 1.3.8-update3)
  *
  * Robustness rules:
  *  - i386: never touch 0xFEE00000 (outside 1 GB identity map) — return early.
@@ -96,8 +96,15 @@ void lapic_start_ap(uint8_t apic_id, uint32_t trampoline_page) {
 
 void lapic_init(void) {
     const struct acpi_info *ai = acpi_get();
-    if (ai && ai->lapic_addr)
-        lapic_phys = ai->lapic_addr;
+    if (ai && ai->lapic_addr) {
+        /* MADT local APIC address must be in MMIO space (~4GB).  Low
+         * values mean a corrupt parse — fall back to the default. */
+        if (ai->lapic_addr >= 0xFEC00000UL)
+            lapic_phys = ai->lapic_addr;
+        else
+            pr_warn("lapic: ignoring bogus ACPI LAPIC addr 0x%x\n",
+                    (unsigned)ai->lapic_addr);
+    }
 
 #if defined(__i386__)
     /*
@@ -149,4 +156,50 @@ void lapic_init(void) {
     lapic_ok = 1;
     pr_info("lapic: base=0x%x id=%u ver=0x%x\n",
             (unsigned)lapic_phys, lapic_id(), lapic_ver_cached);
+}
+
+/* ---- 1.2.9: AP init + periodic LAPIC timer ---- */
+
+void lapic_ap_init(void) {
+#if defined(__i386__)
+    return;
+#else
+    if (!lapic_ok || !lapic_regs)
+        return;
+    /* Soft-enable APIC; keep LINT0 masked on AP (no ExtINT from 8259). */
+    uint32_t svr = lapic_read(LAPIC_SVR);
+    svr |= LAPIC_SVR_ENABLE;
+    lapic_write(LAPIC_SVR, svr);
+    lapic_write(LAPIC_LVT_LINT0, LAPIC_LVT_MASKED);
+    lapic_write(LAPIC_LVT_LINT1, LAPIC_LVT_MASKED);
+    lapic_write(LAPIC_LVT_ERROR, LAPIC_LVT_MASKED);
+    lapic_write(LAPIC_TPR, 0);
+    lapic_write(LAPIC_EOI, 0);
+#endif
+}
+
+void lapic_timer_enable(uint32_t initial_count, uint8_t vector) {
+#if defined(__i386__)
+    (void)initial_count;
+    (void)vector;
+    return;
+#else
+    if (!lapic_ok || !lapic_regs)
+        return;
+    /* Divide by 16 */
+    lapic_write(LAPIC_TIMER_DIV, 0x3);
+    /* Periodic mode, unmasked, vector */
+    lapic_write(LAPIC_LVT_TIMER, (1u << 17) | (vector & 0xFF));
+    lapic_write(LAPIC_TIMER_INIT, initial_count ? initial_count : 100000);
+#endif
+}
+
+void lapic_timer_disable(void) {
+#if defined(__i386__)
+    return;
+#else
+    if (!lapic_ok || !lapic_regs)
+        return;
+    lapic_write(LAPIC_LVT_TIMER, LAPIC_LVT_MASKED);
+#endif
 }

@@ -8,6 +8,7 @@
 #include "process.h"
 #include "wait.h"
 #include <stdint.h>
+#include "usb.h"
 
 #define PIT_COMMAND_PORT  0x43
 #define PIT_CHANNEL0_PORT 0x40
@@ -19,6 +20,9 @@ static uint32_t timer_hz = 100;
 static void timer_handler(struct interrupt_frame *frame) {
     (void)frame;
     tick_count++;
+    /* USB HID boot keyboards (control GET_REPORT) ~50 Hz */
+    if ((tick_count & 1u) == 0u)
+        usb_hid_poll();
     /* Wake sleepers whose deadline has passed, then reschedule.
        Both run with IF=0 (interrupt gate). */
     process_wake_timed();

@@ -50,5 +50,12 @@ void test_suite_ramfs(void);
 void test_suite_regression(void);
 void test_suite_smp(void);      /* new: LAPIC / SMP foundation */
 void test_suite_atomic(void);   /* new: atomic.h primitives */
+void test_suite_kthread(void);  /* 1.2.10 kernel threads */
+void test_suite_uthread(void);  /* 1.2.11 user threads */
+void test_suite_futex(void);
+void test_suite_usb(void);   /* 1.2.12 futex */
 
 #endif /* TEST_H */
+
+void test_suite_usb(void);
+void test_suite_hpet_audio(void);

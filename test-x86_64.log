@@ -1,0 +1,574 @@
+c[?7l[2J[0mSeaBIOS (version 1.17.0-debian-1.17.0-1ubuntu1)
+
+
+iPXE (https://ipxe.org) 00:03.0 CA00 PCI2.10 PnP PMM+06FC8E00+06F08E00 CA00
+Press Ctrl-B to configure iPXE (PCI 00:03.0)...                                                                               
+
+
+Booting from Hard Disk...
+Font: ISO.F16 8x16 VGA font loaded
+[0] INFO  log: ring buffer 16384 bytes ready
+  ษออออออออออออออออออออออออออออออออออออออป
+  บ  TigxOS  V1.3.7              บ
+  บ  orange ? black ? ring3            บ
+  ศออออออออออออออออออออออออออออออออออออออผ
+  ? 128 MB RAM  ?  ? 512 MB disk
+
+
+=== Memory Management ===
+Reading E820 from bootloader...
+E820 returned 7 entries
+Usable RAM detected: 127 MB
+Total RAM detected: 12415 MB
+Total:12415MB Usable:127MB FrameSpace:131072 (512MB)
+
+Memory Map:
+  [0] 0x0000000000000000 +0x000000000009fc00 Usable
+  [1] 0x000000000009fc00 +0x0000000000000400 Reserved
+  [2] 0x00000000000f0000 +0x0000000000010000 Reserved
+  [3] 0x0000000000100000 +0x0000000007ee0000 Usable
+  [4] 0x0000000007fe0000 +0x0000000000020000 Reserved
+  [5] 0x00000000fffc0000 +0x0000000000040000 Reserved
+  [6] 0x0000000000000000 +0x0000000000000000 Reserved
+
+PMM init...
+PMM ready: 30688 free frames (119 MB)
+VMM: PML4 @ 0x0000000000001000, USER window 4MB-64MB
+Heap init...
+Heap at 0x0000000000800000 (1020 KB + 4KB guard)
+=========================
+
+ASpace: kernel CR3=0x0000000000001000; user stack @ 0x0000000003efc000-0x0000000003f00000 (guard below)
+ACPI...
+[0] INFO  acpi: RSDP @ 0xf5280  rev=0  OEM=%.6s
+[0] INFO  acpi: _S5_ SLP_TYPa=11 SLP_TYPb=10
+[0] INFO  acpi: FADT PM1a_CNT=0x604  reset=no
+[0] INFO  acpi: MADT 1 CPU(s), 1 I/O APIC(s), LAPIC @ 0xfee00000
+[0] INFO  acpi: 1 CPU(s) ready for SMP
+GDT+TSS...
+GDT+TSS loaded (x86_64, user CS=0x23 DS=0x1b)
+IDT...
+Syscalls...
+Syscall: int 0x80 DPL=3  ABI v1
+Timer...
+Timer 100 Hz (preemptive, blocking sleep)
+Keyboard...
+Keyboard: arrows/home/end/del, Caps, Shift, Ctrl, blocking
+Disk...
+ATA: probing primary master (PIO, LBA28)...
+ATA: drive found
+
+=== Disk (primary master) ===
+Model:    QEMU HARDDISK
+Serial:   QM00001
+Firmware: 2.5+
+Sectors:  1048576 (512 MB)
+LBA28:    1048576 sectors
+LBA48:    yes (size only; I/O is LBA28)
+=============================
+
+PCI...
+[0] INFO  pci: enumerated %zu function(s)
+AHCI...
+[0] INFO  ahci: no HBA on PCI (ATA remains primary)
+Block...
+[0] INFO  block: registered ata0 (1048576 sectors)
+Partitions...
+[0] INFO  part: 1 partition(s)
+FS...
+fs: mounted TigFS v6 (64 inodes, 1790 data blocks)
+ramfs: /tmp ready (32 inodes, 64 KB pool)
+VFS: TigFS mounted at /, ramfs at /tmp
+Mounts...
+[0] INFO  mount: 2 mount(s)
+
+Processes (preemptive, blocking)...
+Filetable: 64 open-file slots (shared offset + refcount)
+Pipes: 8 x 8192 bytes (blocking R/W)
+Process subsystem OK (preemptive, blocking, ring3, SMP-ready)
+LAPIC...
+[0] INFO  lapic: base=0xfee00000 id=0 ver=0x14
+IOAPIC...
+[0] INFO  ioapic: @0xfec00000 ver=32 maxredir=23 gsi_base=0
+[0] INFO  ioapic: found, routing not enabled (8259 PIC stays active)
+SMP...
+[0] INFO  smp: single CPU (MADT reports 1)
+HAL...
+[0] INFO  hal: arch=x86_64 vendor=AuthenticAMD
+[0] INFO  hal: cpu=QEMU Virtual CPU version 2.5+
+[0] INFO  hal: apic=1 x2apic=0 msi=1
+[0] INFO  hal: 1 logical CPU(s), BSP APIC ID 0
+USB...
+[0] INFO  xhci: no controller (QEMU: -device qemu-xhci)
+[0] INFO  usb: no host controller
+HPET...
+[0] INFO  hpet: base=0xfed00000 period=10000000 fs
+Audio...
+[0] INFO  audio: no AC97/HDA; PC speaker available
+Framebuffer...
+[0] INFO  fb: BGA present (call fb_enable_bga to use graphics)
+Mouse...
+[0] INFO  mouse: PS/2 stream ready (IRQ12), pos 511,383 bounds 1024x768
+
+PID  STATE     NAME
+0  READY     ring0  idle *
+
+Interrupts on - timer will preempt
+Scheduler started (preemptive, blocking)
+test-runner started (pid 1)
+
+ษออ ALL TEST SUITES อออออออออออออออออออออออออออออออออออออออออออออป
+
+?? sync ??????????????????????????????????????????????????????
+ณ [OK] spawned mutex worker
+ณ [OK] mutex serialized 50 increments
+ณ [OK] trylock on free succeeds
+ณ [OK] trylock while held fails
+mutex: unlock by non-owner pid 1 (owner=999) rejected
+ณ [OK] non-owner unlock refused
+ณ [OK] spawned semaphore waiter
+ณ [OK] waiter is BLOCKED on empty semaphore
+ณ [OK] waiter woke after sem_post
+ณ [OK] trywait on count=1 succeeds
+ณ [OK] trywait at count=0 fails
+ณ [OK] sem_post normal
+sem: post refused (at SEM_MAX_COUNT)
+ณ [OK] sem_post refuses overflow
+?? PASS  12/12 checks  6 ticks
+
+
+?? waitq ?????????????????????????????????????????????????????
+ณ [OK] spawned wq waiter
+ณ [OK] waiter blocked
+ณ [OK] wait_queue_wake_one woke the waiter
+ณ [OK] wake_all on empty leaves count=0
+?? PASS  4/4 checks  3 ticks
+
+
+?? timer ?????????????????????????????????????????????????????
+ณ [OK] timer_hz nonzero
+ณ [OK] sleep 10ms
+ณ [OK] sleep 50ms
+ณ [OK] sleep 100ms
+ณ [OK] ticks are monotonic
+?? PASS  5/5 checks  17 ticks
+
+
+?? process ???????????????????????????????????????????????????
+ณ [OK] process_create returns pid
+ณ [OK] lookup by pid works
+ณ [OK] dead process reclaimed
+ณ [OK] spawned exit_with_42
+ณ [OK] process_wait returns exit status 42
+ณ [OK] lookup(-1) returns NULL
+ณ [OK] lookup(out of range) returns NULL
+ณ [OK] idle task exists at pid 0
+ณ [OK] spawned 4 concurrent workers
+ณ [OK] all 4 workers exited
+ณ [OK] process_count approximately restored
+ณ [OK] spawned kill target
+ณ [OK] process_kill on kernel worker returns 0 or -1
+ณ [OK] kill target eventually reclaimed
+ณ [OK] process_kill refuses idle (pid 0)
+ณ [OK] process_kill rejects bad pid
+ณ [OK] process_snapshot returns >= 2 entries
+ณ [OK] process_snapshot includes idle
+?? PASS  18/18 checks  12 ticks
+
+
+?? memory ????????????????????????????????????????????????????
+ณ [OK] kmalloc(1) succeeds
+ณ [OK] kmalloc returns 16-byte aligned
+ณ [OK] kmalloc(0) returns NULL
+ณ [OK] kcalloc zeroes memory
+ณ [OK] krealloc preserves data
+ณ [OK] kmalloc rejects huge size
+kfree: double free
+ณ [OK] double-free tolerated (logged)
+ณ [OK] spawned alloc/free worker
+ณ [OK] allocator healthy after stress
+ณ [OK] heap_validate after stress
+ณ [OK] outstanding +1 after alloc
+ณ [OK] outstanding restored after free
+ณ [OK] kmalloc_peak recorded
+ณ [OK] heap ok after canary-sized free
+?? PASS  14/14 checks  7 ticks
+
+
+?? fs ????????????????????????????????????????????????????????
+ณ [OK] fs_write small file
+ณ [OK] fs_read returns identical bytes
+ณ [OK] fs_size matches written length
+ณ [OK] fs_remove existing file
+ณ [OK] fs_size on removed file fails
+ณ [OK] fs_read missing file fails
+ณ [OK] fs_create rejects long name
+ณ [OK] fs_create rejects duplicate
+ณ [OK] empty file has size 0
+ณ [OK] multi-block write/read matches
+ณ [OK] fs_write rejects > direct-block limit
+ณ [OK] rewrite shrinks size
+ณ [OK] rewrite content
+ณ [OK] remove missing fails
+ณ [OK] fs_resolve_path relative
+ณ [OK] resolve starts with /foo
+ณ [OK] resolve .. from /a/b
+ณ [OK] resolve result /a/c
+ณ [OK] fs_data_blocks > 0
+ณ [OK] free <= total blocks
+?? PASS  20/20 checks  25 ticks
+
+
+?? vfs ???????????????????????????????????????????????????????
+ณ [OK] root is directory
+ณ [OK] root is inode 0
+ณ [OK] /bin is directory
+ณ [OK] /bin inode > 0
+ณ [OK] shell.elf is file under /bin
+ณ [OK] shell.elf has size
+ณ [OK] resolve relative with ..
+ณ [OK] resolve -> /bin/shell.elf
+ณ [OK] resolve absolute with . and ..
+ณ [OK] resolve drops . and ..
+ณ [OK] getdents_path on /
+ณ [OK] getdents multiple of 32
+ณ [OK] getdents_path on /bin
+ณ [OK] vfs_stat /bin dir
+ณ [OK] vfs_is_dir /bin
+ณ [OK] vfs_is_dir /
+ณ [OK] vfs_stat missing fails
+ณ [OK] missing path lookup fails
+ณ [OK] mkdir /T_VDIR
+ณ [OK] create nested file
+ณ [OK] write nested
+ณ [OK] read nested
+?? PASS  22/22 checks  15 ticks
+
+
+?? elf ???????????????????????????????????????????????????????
+elf: bad magic
+ณ [OK] elf_load_image rejects non-ELF
+ณ [OK] elf_load_image rejects <16 bytes
+ณ [OK] embedded hello.elf parses
+ณ [OK] entry point nonzero
+ณ [OK] load range valid
+ณ [OK] brk >= load_max
+ณ [OK] brk is page-aligned
+ณ   (hello.elf not on disk, skipping file load)
+ณ [OK] elf_load_file missing path fails
+?? PASS  8/8 checks  3 ticks
+
+
+?? syscall ???????????????????????????????????????????????????
+ณ [OK] int 0x80 vector
+ณ [OK] SYS_EXIT == 0
+ณ [OK] WRITE=1 READ=5
+ณ [OK] OPEN=6 CLOSE=7
+ณ [OK] GETDENTS/SPAWN/WAIT numbers
+ณ [OK] UNLINK=11 STAT=12
+ณ [OK] KILL=16 SETFG=17
+ณ [OK] PSINFO=22 HALT=23
+ณ [OK] SYS_MKDIR == 24
+ณ [OK] SYS_ABI_VERSION == 25
+ณ [OK] SYS_DMESG == 26
+ณ [OK] SYS_POWEROFF == 27
+ณ [OK] SYS_REBOOT == 28
+ณ [OK] SYS_MAX == 34
+ณ [OK] DUP/DUP2/PIPE numbers
+ณ [OK] BRK/CHDIR/GETCWD numbers
+ณ [OK] SYS_SYSINFO == 21
+ณ [OK] TIGX_SYSCALL_ABI == 1
+ณ [OK] open flags low
+ณ [OK] open flags high
+ณ [OK] error code constants
+ณ [OK] fault/badfd constants
+ณ [OK] process_current() non-NULL
+ณ [OK] current pid valid
+ณ [OK] stdout FD initialized
+ณ [OK] fs_getdents succeeds
+ณ [OK] getdents size multiple of dirent
+ณ [OK] error codes negative
+ณ   (ring3 syscalls + ABI v1 argument checks)
+?? PASS  28/28 checks  8 ticks
+
+
+?? console ???????????????????????????????????????????????????
+? palette: ################################
+ณ [OK] all 16 foreground colors render
+? TigxOS V1.2.0  brand demo
+ณ [OK] brand color sequence renders
+~- TigxOS inline color
+ณ [OK] console_write_colored inline codes parse
+?? PASS  3/3 checks  2 ticks
+
+
+?? string ????????????????????????????????????????????????????
+ณ [OK] strlen empty
+ณ [OK] strlen abc
+ณ [OK] strcmp equal
+ณ [OK] strcmp a<b
+ณ [OK] strcmp b>a
+ณ [OK] strncmp n=2
+ณ [OK] strncmp n=3
+ณ [OK] memset fills
+ณ [OK] memcpy copies
+ณ [OK] memmove overlap
+ณ [OK] strncat appends
+ณ [OK] strncpy truncates
+ณ [OK] memcmp equal
+ณ [OK] memcmp less
+?? PASS  14/14 checks  4 ticks
+
+
+?? pipe ??????????????????????????????????????????????????????
+ณ [OK] pipe_alloc succeeds
+ณ [OK] pipe_write 2 bytes
+ณ [OK] pipe_read matches
+ณ [OK] pre-write 4 bytes for reader
+ณ [OK] spawned pipe reader
+ณ [OK] cross-task pipe transfer
+ณ [OK] pipe_decref both ends
+ณ [OK] pipe_read bad id fails
+ณ [OK] pipe_write bad id fails
+?? PASS  9/9 checks  4 ticks
+
+
+?? irq ???????????????????????????????????????????????????????
+ณ [OK] irq_save/restore nested pair
+ณ [OK] spinlock init unlocked
+ณ [OK] spin_lock acquires
+ณ [OK] trylock fails when held
+ณ [OK] spin_unlock releases
+ณ [OK] trylock succeeds when free
+ณ [OK] spin_lock_irqsave acquires
+ณ [OK] spin_unlock_irqrestore releases
+?? PASS  8/8 checks  3 ticks
+
+
+?? rtc ???????????????????????????????????????????????????????
+ณ [OK] rtc_read succeeds
+ณ [OK] rtc year sane
+ณ [OK] rtc month 1-12
+ณ [OK] rtc day 1-31
+ณ [OK] rtc hour 0-23
+ณ [OK] rtc min 0-59
+ณ [OK] rtc sec 0-59
+ณ [OK] rtc_read NULL fails
+?? PASS  8/8 checks  3 ticks
+
+
+?? gdt ???????????????????????????????????????????????????????
+ณ [OK] kernel CS selector
+ณ [OK] kernel DS selector
+ณ [OK] user DS selector
+ณ [OK] user CS selector
+ณ [OK] TSS selector
+ณ [OK] USER_CS has RPL=3
+ณ [OK] USER_DS has RPL=3
+ณ [OK] user CS RPL is 3
+?? PASS  8/8 checks  3 ticks
+
+
+?? aspace ????????????????????????????????????????????????????
+ณ [OK] aspace_kernel non-NULL
+ณ [OK] aspace_create succeeds
+ณ [OK] user aspace distinct from kernel
+ณ [OK] pmm frame for map
+ณ [OK] aspace_map at 4MB
+ณ [OK] virt_to_phys returns mapping
+ณ [OK] aspace_destroy completes
+ณ [OK] user_range helper callable
+?? PASS  8/8 checks  3 ticks
+
+
+?? sched ?????????????????????????????????????????????????????
+ณ [OK] cpu_this non-NULL
+ณ [OK] at least one CPU online
+ณ [OK] CPU 0 is online
+ณ [OK] CPU 0 id is 0
+ณ [OK] process_current matches cpu->cur
+ณ [OK] self priority in range
+ณ [OK] set self to PRIO_MAX
+ณ [OK] get reflects PRIO_MAX
+ณ [OK] restore self priority
+ณ [OK] cannot raise idle priority
+ณ [OK] reject out-of-range priority
+ณ [OK] spawned two equal-prio workers
+ณ [OK] both workers ran (spin counters)
+ณ [OK] both workers accrued ticks
+ณ [OK] equal-prio fairness within 4x
+ณ [OK] spawned lo/hi priority workers
+ณ [OK] high-prio worker accrued ticks
+ณ [OK] high-prio got at least as many ticks as low
+ณ [OK] cpu switch counter readable
+?? PASS  19/19 checks  26 ticks
+
+
+?? ramfs ?????????????????????????????????????????????????????
+ณ [OK] /tmp is directory
+ณ [OK] vfs_stat /tmp
+ณ [OK] /tmp is ramfs
+ณ [OK] mkdir /tmp/rd
+ณ [OK] /tmp/rd is dir
+ณ [OK] create /tmp/rd/a.txt
+ณ [OK] open /tmp file
+ณ [OK] open returns ramfs fsid
+ณ [OK] write /tmp file
+ณ [OK] read /tmp file
+ณ [OK] stat size 5
+ณ [OK] file is not dir
+ณ [OK] getdents /tmp has entry
+ณ [OK] getdents /tmp/rd has a.txt
+ณ [OK] unlink /tmp file
+ณ [OK] unlinked gone
+ณ [OK] rmdir /tmp/rd
+ณ [OK] cannot remake /tmp root via mkdir of self
+ณ [OK] cannot unlink /tmp root
+ณ [OK] nested mkdir
+ณ [OK] nested create
+ณ [OK] open nested
+ณ [OK] nested R/W
+?? PASS  23/23 checks  11 ticks
+
+
+?? atomic ????????????????????????????????????????????????????
+ณ [OK] atomic_xchg swaps
+ณ [OK] atomic_xchg second swap
+ณ [OK] atomic_cmpxchg success
+ณ [OK] atomic_cmpxchg mismatch leaves value
+ณ [OK] atomic_inc twice
+ณ [OK] atomic_dec
+ณ [OK] atomic_add_fetch returns new value
+ณ [OK] atomic_add_fetch negative
+ณ [OK] atomic_load/store_u32
+ณ [OK] atomic_xchg stress loop
+ณ [OK] spin_trylock acquires free lock
+ณ [OK] spin_trylock fails on held lock
+ณ [OK] spin_trylock after unlock
+?? PASS  13/13 checks  4 ticks
+
+
+?? smp ???????????????????????????????????????????????????????
+ณ [OK] at least one CPU online
+ณ [OK] smp_cpu_id non-negative
+ณ [OK] smp_cpu_id < NCPU_MAX
+ณ [OK] test runner is BSP
+ณ [OK] MADT reports >= 1 CPU
+ณ [OK] ap_started non-negative
+ณ [OK] AP count consistent with online
+ณ [OK] cpu_this non-NULL
+ณ [OK] BSP logical id is 0
+ณ [OK] BSP marked online
+ณ [OK] cpu_count_online matches smp_cpu_count
+ณ [OK] LAPIC base non-zero
+ณ [OK] LAPIC version readable
+ณ [OK] LAPIC id fits in 8 bits
+ณ   LAPIC id=0 ver=0x14 base=0xfee00000
+ณ [OK] online count in [1, NCPU_MAX]
+ณ [OK] switch counter did not go backwards
+ณ [OK] smp_apic_id non-negative
+ณ [OK] self resched sets need_resched
+ณ [OK] clear need_resched
+ณ [OK] tlb counter monotonic
+ณ [OK] rq depth noted
+ณ [OK] balance steals readable
+ณ [OK] smp stress: many yields
+ณ [OK] smp stress path ok
+ณ [OK] spawned multicore workers
+ณ [OK] multicore workers made progress
+ณ [OK] UP: concurrent multi-CPU N/A
+ณ [OK] resched counter monotonic under stress
+ณ [OK] tlb counter monotonic under stress
+ณ [OK] set affinity to CPU0
+ณ [OK] get affinity CPU0
+ณ [OK] pick_cpu non-negative
+ณ   online=1 madt=1 aps=0 steals=0 ipi_r=0 ipi_t=0
+?? PASS  32/32 checks  24 ticks
+
+
+?? kthread ???????????????????????????????????????????????????
+ณ [OK] kthread_create returns tid
+ณ [OK] kthread alive after create
+ณ [OK] kthread_join succeeds
+ณ [OK] join status is 42
+ณ [OK] kthread body ran
+ณ [OK] kthread not alive after join
+ณ [OK] kthread_create with arg
+ณ [OK] join arg thread
+ณ [OK] arg delivered to entry
+ณ [OK] create for detach
+ณ [OK] kthread_detach ok
+ณ [OK] detached kthread finished
+ณ [OK] spawned 4 concurrent kthreads
+ณ [OK] joined all concurrent kthreads
+ณ [OK] create NULL entry fails
+ณ [OK] join bad tid fails
+ณ [OK] join idle fails
+ณ [OK] detach bad tid fails
+?? PASS  18/18 checks  7 ticks
+
+
+?? uthread ???????????????????????????????????????????????????
+ณ [OK] SYS_CLONE == 29
+ณ [OK] SYS_THREAD_EXIT == 30
+ณ [OK] SYS_THREAD_JOIN == 31
+ณ [OK] SYS_SET_TLS == 32
+ณ [OK] SYS_GETTID == 33
+ณ [OK] SYS_MAX == 34
+ณ [OK] clone refuses non-user current
+ณ [OK] tls_base stored
+ณ [OK] group_kill bad tgid fails
+ณ [OK] group_kill zero fails
+ณ [OK] thread_join bad tid
+ณ [OK] thread_join idle fails
+ณ [OK] current for exit_thread_only
+ณ [OK] exit_thread_only starts clear
+ณ [OK] exit_thread_only settable on self
+ณ [OK] exit_thread_only cleared
+ณ [OK] aspace_ref/unref tolerate kernel AS
+ณ [OK] ABI still v1 (new numbers appended)
+ณ   (ring-3 clone via SYS_CLONE; exit_thread_only is per-task)
+?? PASS  18/18 checks  6 ticks
+
+
+?? futex ?????????????????????????????????????????????????????
+ณ [OK] SYS_FUTEX == 34
+ณ [OK] SYS_MAX == 34
+ณ [OK] futex op constants
+ณ [OK] futex_wait from kernel task fails
+ณ [OK] futex_wake from kernel task fails
+ณ [OK] misaligned uaddr rejected
+ณ [OK] non-user uaddr rejected
+ณ [OK] kernel mutex_trylock
+ณ [OK] kernel mutex free after unlock
+ณ   (user futex/mutex exercised via libc from ring-3)
+?? PASS  9/9 checks  3 ticks
+
+
+?? usb ???????????????????????????????????????????????????????
+ณ [OK] usb_device_count non-negative
+ณ [OK] usb_msc_block_count non-negative
+ณ [OK] no xhci when usb says none
+ณ   (no xHCI on PCI - default QEMU; use -device qemu-xhci)
+ณ [OK] usb_init completed without panic
+?? PASS  4/4 checks  2 ticks
+
+
+?? hpet-audio ????????????????????????????????????????????????
+ณ [OK] hpet_present boolean
+ณ [OK] audio_present boolean
+ณ [OK] audio backend name non-NULL
+ณ [OK] hpet counter advances
+?? PASS  4/4 checks  2 ticks
+
+
+?? regression ????????????????????????????????????????????????
+ณ [OK] created reg_a
+ณ [OK] created reg_b
+ณ [OK] lookup(pid) matches pid (reuse OK, never wrong task)
+ณ [OK] blocking sleep advances ticks
+?? PASS  4/4 checks  5 ticks
+
+ศออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออออผ
+
+ALL TESTS PASSED (333 checks)

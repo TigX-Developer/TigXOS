@@ -1,4 +1,4 @@
-/* user/libc.h — minimal libc for ring-3 (syscall ABI v1, TigxOS 1.2.4+) */
+/* user/libc.h — minimal libc for ring-3 (syscall ABI v1, TigxOS 1.3.8+) */
 #ifndef USER_LIBC_H
 #define USER_LIBC_H
 
@@ -97,6 +97,9 @@ struct sys_proc_info {
     int  state;       /* 0 unused 1 ready 2 running 3 blocked 4 dead */
     int  is_user;
     int  exit_status;
+    int  tgid;
+    int  tid;
+    int  is_thread;
     char name[32];
 };
 #define SYS_PSINFO_MAX 16
@@ -153,3 +156,42 @@ long writech(int fd, int c);      /* write one byte */
 void listdir(void);               /* print "name  size" lines for root */
 
 #endif
+
+/* ---- 1.2.12 threads + sync (pthread-like) ---- */
+#define SYS_CLONE       29
+#define SYS_THREAD_EXIT 30
+#define SYS_THREAD_JOIN 31
+#define SYS_SET_TLS     32
+#define SYS_GETTID      33
+#define SYS_FUTEX       34
+#define FUTEX_WAIT      0
+#define FUTEX_WAKE      1
+
+extern int errno;
+
+int  gettid(void);
+int  thread_create(void (*entry)(void), void *stack_top); /* stack 0 = kernel maps */
+int  thread_join(int tid, int *status);
+void thread_exit(int status);
+int  futex(volatile int *uaddr, int op, int val);
+
+typedef struct { volatile int lock; } mutex_t;
+void mutex_init(mutex_t *m);
+void mutex_lock(mutex_t *m);
+void mutex_unlock(mutex_t *m);
+int  mutex_trylock(mutex_t *m);
+
+typedef struct {
+    volatile int seq;
+    mutex_t     *m;
+} cond_t;
+void cond_init(cond_t *c);
+int  cond_wait(cond_t *c, mutex_t *m);
+int  cond_signal(cond_t *c);
+int  cond_broadcast(cond_t *c);
+/* 1.3.8 Green Lizard thread bindings */
+int gl_thread_spawn(void (*entry)(void), void *stack_top);
+int gl_thread_join(int tid, int *status);
+void gl_thread_exit(int status);
+int gl_thread_self(void);
+

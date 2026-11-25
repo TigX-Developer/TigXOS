@@ -1,4 +1,4 @@
-/* filetable.h — shared open-file objects (TigxOS 1.2.1) */
+/* filetable.h — shared open-file objects (TigxOS 1.3.8) */
 #ifndef FILETABLE_H
 #define FILETABLE_H
 

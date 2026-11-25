@@ -1,4 +1,4 @@
-/* ramfs.h — in-memory filesystem mounted at /tmp (TigxOS 1.2.1) */
+/* ramfs.h — in-memory filesystem mounted at /tmp (TigxOS 1.3.8) */
 #ifndef RAMFS_H
 #define RAMFS_H
 

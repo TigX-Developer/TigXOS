@@ -41,8 +41,14 @@
 #define SYS_DMESG       26   /* buf, len, offset → bytes copied (1.2.5+) */
 #define SYS_POWEROFF    27   /* → does not return (1.2.6+) */
 #define SYS_REBOOT      28   /* → does not return (1.2.6+) */
+#define SYS_CLONE       29   /* entry, stack, flags → tid (1.2.11) */
+#define SYS_THREAD_EXIT 30   /* status → does not return (this thread only) */
+#define SYS_THREAD_JOIN 31   /* tid, status* → 0 or -1 */
+#define SYS_SET_TLS     32   /* tls_base → 0 or -1 */
+#define SYS_GETTID      33   /* → tid */
+#define SYS_FUTEX       34   /* uaddr, op, val, timeout_ms (1.2.12) */
 
-#define SYS_MAX         28   /* highest defined number */
+#define SYS_MAX         34   /* highest defined number */
 
 /* Lightweight negative returns (kernel does not keep per-thread errno) */
 #define SY_OK            0
@@ -101,6 +107,9 @@ struct sys_proc_info {
     int32_t  state;
     int32_t  is_user;
     int32_t  exit_status;
+    int32_t  tgid;
+    int32_t  tid;
+    int32_t  is_thread;
     char     name[32];
 };
 

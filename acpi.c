@@ -1,4 +1,4 @@
-/* acpi.c — RSDP/RSDT/XSDT, FADT, MADT, S5 poweroff/reboot (TigxOS 1.2.6) */
+/* acpi.c — RSDP/RSDT/XSDT, FADT, MADT, S5 poweroff/reboot (TigxOS 1.3.8) */
 
 #include "acpi.h"
 #include "console.h"
@@ -242,6 +242,29 @@ static void parse_madt(struct sdt_header *h) {
             info.cpu_count, info.ioapic_count, info.lapic_addr);
 }
 
+
+/* HPET table (ACPI 2.0+): find MMIO base instead of hardcoding 0xFED00000. */
+static void parse_hpet(struct sdt_header *h) {
+    /* Layout after header:
+     *  event_timer_block_id u32
+     *  base_address GAS (12 bytes): space_id, bit_width, bit_offset, access, address u64
+     */
+    if (h->length < sizeof(struct sdt_header) + 4 + 12)
+        return;
+    const uint8_t *p = (const uint8_t *)(h + 1);
+    p += 4; /* skip event_timer_block_id */
+    uint8_t space = p[0];
+    uint64_t addr = 0;
+    for (int i = 0; i < 8; i++)
+        addr |= (uint64_t)p[4 + i] << (8 * i);
+    if (space != 0) /* only System Memory */
+        return;
+    if (addr == 0)
+        return;
+    info.hpet_addr = addr;
+    pr_info("acpi: HPET @ 0x%llx\n", (unsigned long long)addr);
+}
+
 static void walk_sdt(uint32_t addr, int is_xsdt) {
     struct sdt_header *root = (struct sdt_header *)(uintptr_t)addr;
     if (!table_ok(root)) return;
@@ -265,6 +288,8 @@ static void walk_sdt(uint32_t addr, int is_xsdt) {
             parse_fadt(t);
         else if (sig_eq(t->sig, "APIC", 4))
             parse_madt(t);
+        else if (sig_eq(t->sig, "HPET", 4))
+            parse_hpet(t);
     }
 }
 

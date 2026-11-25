@@ -336,11 +336,18 @@ typedef struct mhdr {
 } mhdr_t;
 
 static mhdr_t *free_list;
+static mutex_t g_malloc_mu;
+static int g_malloc_mu_ready;
+static void g_malloc_mu_init(void) {
+    if (!g_malloc_mu_ready) { mutex_init(&g_malloc_mu); g_malloc_mu_ready = 1; }
+}
 
 void *malloc(size_t n) {
+    g_malloc_mu_init();
+    mutex_lock(&g_malloc_mu);
     if (n == 0)
         n = 1;
-    n = (n + 7) & ~(size_t)7; /* 8-byte align */
+    n = (n + 7) & ~(size_t)7;
     mhdr_t *prev = 0, *c = free_list;
     while (c) {
         if (c->free && c->size >= n) {
@@ -350,32 +357,40 @@ void *malloc(size_t n) {
             else
                 free_list = c->next;
             c->next = 0;
+            mutex_unlock(&g_malloc_mu);
             return (char *)c + sizeof(mhdr_t);
         }
         prev = c;
         c = c->next;
     }
-    /* sbrk new block */
     size_t total = sizeof(mhdr_t) + n;
     void *p = sbrk((long)total);
-    if (p == (void *)-1)
+    if (p == (void *)-1) {
+        mutex_unlock(&g_malloc_mu);
         return 0;
+    }
     mhdr_t *h = (mhdr_t *)p;
     h->size = n;
     h->next = 0;
     h->free = 0;
+    mutex_unlock(&g_malloc_mu);
     return (char *)h + sizeof(mhdr_t);
 }
 
 void free(void *ptr) {
     if (!ptr)
         return;
+    g_malloc_mu_init();
+    mutex_lock(&g_malloc_mu);
     mhdr_t *h = (mhdr_t *)((char *)ptr - sizeof(mhdr_t));
-    if (h->free)
-        return; /* double-free: ignore */
+    if (h->free) {
+        mutex_unlock(&g_malloc_mu);
+        return;
+    }
     h->free = 1;
     h->next = free_list;
     free_list = h;
+    mutex_unlock(&g_malloc_mu);
 }
 
 void *realloc(void *ptr, size_t n) {
@@ -466,4 +481,153 @@ void listdir(void) {
             printf("%s  %u\n", d->name, (unsigned)d->size);
         off += (int)sizeof(struct dirent);
     }
+}
+
+/* ---- 1.2.12: threads, futex, mutex, cond, errno ---- */
+int errno;
+
+int gettid(void) {
+    return (int)syscall(SYS_GETTID, 0, 0, 0);
+}
+
+int thread_create(void (*entry)(void), void *stack_top) {
+    return (int)syscall(SYS_CLONE, (long)entry, (long)stack_top, 0);
+}
+
+int thread_join(int tid, int *status) {
+    return (int)syscall(SYS_THREAD_JOIN, tid, (long)status, 0);
+}
+
+void thread_exit(int status) {
+    syscall(SYS_THREAD_EXIT, (long)status, 0, 0);
+    for (;;)
+        ;
+}
+
+int futex(volatile int *uaddr, int op, int val) {
+    return (int)syscall(SYS_FUTEX, (long)uaddr, op, val);
+}
+
+void mutex_init(mutex_t *m) {
+    if (m) m->lock = 0;
+}
+
+void mutex_lock(mutex_t *m) {
+    if (!m) return;
+    for (;;) {
+        if (__sync_bool_compare_and_swap(&m->lock, 0, 1))
+            return;
+        futex(&m->lock, FUTEX_WAIT, 1);
+    }
+}
+
+int mutex_trylock(mutex_t *m) {
+    if (!m) return -1;
+    return __sync_bool_compare_and_swap(&m->lock, 0, 1) ? 0 : -1;
+}
+
+void mutex_unlock(mutex_t *m) {
+    if (!m) return;
+    __sync_lock_release(&m->lock);
+    futex(&m->lock, FUTEX_WAKE, 1);
+}
+
+void cond_init(cond_t *c) {
+    if (!c) return;
+    c->seq = 0;
+    c->m = 0;
+}
+
+int cond_wait(cond_t *c, mutex_t *m) {
+    if (!c || !m) return -1;
+    int seq = c->seq;
+    c->m = m;
+    mutex_unlock(m);
+    futex(&c->seq, FUTEX_WAIT, seq);
+    mutex_lock(m);
+    return 0;
+}
+
+int cond_signal(cond_t *c) {
+    if (!c) return -1;
+    __sync_fetch_and_add(&c->seq, 1);
+    futex(&c->seq, FUTEX_WAKE, 1);
+    return 0;
+}
+
+int cond_broadcast(cond_t *c) {
+    if (!c) return -1;
+    __sync_fetch_and_add(&c->seq, 1);
+    futex(&c->seq, FUTEX_WAKE, 0x7fffffff);
+    return 0;
+}
+
+
+/* ---- 1.3.7 Green Lizard thread/channel bindings (libc surface) ---- */
+typedef struct {
+    volatile int msg;
+    volatile int has;
+    mutex_t mu;
+    cond_t  cv;
+    int ready;
+} gl_channel_t;
+
+int gl_channel_create(gl_channel_t *ch)
+{
+    if (!ch) return -1;
+    ch->msg = 0;
+    ch->has = 0;
+    mutex_init(&ch->mu);
+    cond_init(&ch->cv);
+    ch->ready = 1;
+    return 0;
+}
+
+int gl_channel_send(gl_channel_t *ch, int v)
+{
+    if (!ch || !ch->ready) return -1;
+    mutex_lock(&ch->mu);
+    while (ch->has)
+        cond_wait(&ch->cv, &ch->mu);
+    ch->msg = v;
+    ch->has = 1;
+    mutex_unlock(&ch->mu);
+    cond_signal(&ch->cv);
+    return 0;
+}
+
+int gl_channel_recv(gl_channel_t *ch, int *out)
+{
+    if (!ch || !ch->ready || !out) return -1;
+    mutex_lock(&ch->mu);
+    while (!ch->has)
+        cond_wait(&ch->cv, &ch->mu);
+    *out = ch->msg;
+    ch->has = 0;
+    mutex_unlock(&ch->mu);
+    cond_signal(&ch->cv);
+    return 0;
+}
+
+
+/* ---- 1.3.8 Green Lizard thread bindings (beyond channels) ---- */
+int gl_thread_spawn(void (*entry)(void), void *stack_top)
+{
+    if (!entry) return -1;
+    return thread_create(entry, stack_top);
+}
+
+int gl_thread_join(int tid, int *status)
+{
+    return thread_join(tid, status);
+}
+
+void gl_thread_exit(int status)
+{
+    thread_exit(status);
+}
+
+int gl_thread_self(void)
+{
+    return gettid();
 }

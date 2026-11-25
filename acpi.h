@@ -1,4 +1,4 @@
-/* acpi.h — ACPI table discovery, power control, MADT (TigxOS 1.2.6) */
+/* acpi.h — ACPI table discovery, power control, MADT (TigxOS 1.3.8) */
 #ifndef TIGX_ACPI_H
 #define TIGX_ACPI_H
 
@@ -34,6 +34,7 @@ struct acpi_info {
     int      ioapic_count;
     int      override_count;
     uint32_t lapic_addr;    /* default 0xFEE00000 */
+    uint64_t hpet_addr;     /* 0 if unknown; from HPET table or fallback */
     uint16_t pm1a_cnt;      /* PM1a control port */
     uint16_t pm1b_cnt;
     uint8_t  slp_typa;      /* S5 sleep type from _S5_ */

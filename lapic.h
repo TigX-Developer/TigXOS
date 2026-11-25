@@ -1,4 +1,4 @@
-/* lapic.h — Local APIC (TigxOS 1.2.8-update3)
+/* lapic.h — Local APIC (TigxOS 1.3.8-update3)
  *
  * BSP-only foundation. Application processors park after SIPI until 1.2.9.
  * On i386 the LAPIC MMIO window sits above the 1 GB identity map, so the
@@ -43,5 +43,8 @@ void     lapic_start_ap(uint8_t apic_id, uint32_t trampoline_page);
 int      lapic_present(void);
 uintptr_t lapic_base(void);
 uint32_t lapic_version(void);       /* 0 if not present */
+void     lapic_ap_init(void);       /* enable LAPIC on an AP */
+void     lapic_timer_enable(uint32_t initial_count, uint8_t vector);
+void     lapic_timer_disable(void);
 
 #endif /* TIGX_LAPIC_H */

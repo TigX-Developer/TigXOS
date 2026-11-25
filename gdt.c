@@ -1,6 +1,7 @@
-/* gdt.c — GDT + TSS for ring0/ring3 (TigxOS 1.2.0) */
+/* gdt.c — GDT + TSS for ring0/ring3 (TigxOS 1.3.8) */
 
 
+extern char boot_stack_top[]; /* defined in the arch entry.asm (.bss) */
 #include "gdt.h"
 #include "console.h"
 #include "string.h"
@@ -71,7 +72,7 @@ void gdt_init(void) {
     gdt_set(5, tb, sizeof(tss) - 1, 0x89, 0x00);
 
     tss.ss0 = GDT_KERNEL_DS;
-    tss.esp0 = 0x90000; /* temporary until first process */
+    tss.esp0 = (uintptr_t)boot_stack_top; /* temporary until first process */
     tss.iomap_base = sizeof(tss);
 
     gp.limit = sizeof(gdt) - 1;
@@ -191,7 +192,7 @@ void gdt_init(void) {
     gdt.tss_desc.base_upper = (uint32_t)(tb >> 32);
     gdt.tss_desc.reserved   = 0;
 
-    tss.rsp0 = 0x90000;
+    tss.rsp0 = (uintptr_t)boot_stack_top;
     tss.iomap_base = sizeof(tss);
 
     gp.limit = sizeof(gdt) - 1;
@@ -220,6 +221,28 @@ void gdt_init(void) {
 
     kprintf("GDT+TSS loaded (x86_64, user CS=0x%02x DS=0x%02x)\n",
             USER_CS, USER_DS);
+}
+
+/* Application processors: switch from the low-memory trampoline GDT to the kernel GDT so the
+ * shared IDT (whose gates use the kernel CS selector) works on this CPU. No ltr: the single TSS
+ * belongs to the BSP (a per-CPU TSS is still to do), so APs stay ring 0 for now. */
+void gdt_load_ap(void) {
+    __asm__ volatile("lgdt %0" : : "m"(gp) : "memory");
+    __asm__ volatile(
+        "mov %0, %%ax\n"
+        "mov %%ax, %%ds\n"
+        "mov %%ax, %%es\n"
+        "mov %%ax, %%ss\n"
+        "mov %%ax, %%fs\n"
+        "mov %%ax, %%gs\n"
+        "pushq %1\n"
+        "lea 1f(%%rip), %%rax\n"
+        "pushq %%rax\n"
+        "lretq\n"
+        "1:\n"
+        :
+        : "i"(GDT_KERNEL_DS), "i"(GDT_KERNEL_CS)
+        : "rax", "memory");
 }
 
 #endif

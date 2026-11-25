@@ -1,5 +1,5 @@
 ; arch/x86_64/boot.asm - E820 + 1GB identity + LBA load + CHS fallback (255H/63S)
-; TigxOS 1.1.12 — arch split (boot layer)
+; TigxOS 1.3.8 — arch split (boot layer)
 [org 0x7c00]
 [bits 16]
 

@@ -1,4 +1,4 @@
-# Arch layer (TigxOS 1.2.0)
+# Arch layer (TigxOS 1.3.8)
 
 Shared architecture interface + per-CPU implementation.
 

@@ -1,4 +1,4 @@
-/* pipe.c — ring-buffer pipes, blocking R/W via wait queues (TigxOS 1.1.12) */
+/* pipe.c — ring-buffer pipes, blocking R/W via wait queues (TigxOS 1.3.8) */
 
 #include "pipe.h"
 #include "wait.h"

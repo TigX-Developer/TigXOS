@@ -1,6 +1,6 @@
 
 
-// wait.h - Blocking wait queues for TigxOS 1.1.12
+// wait.h - Blocking wait queues for TigxOS 1.3.8
 #ifndef WAIT_H
 #define WAIT_H
 
@@ -24,7 +24,13 @@ struct wait_queue {
     int         waiters[WAIT_QUEUE_MAX];  /* pids; -1 terminated */
     int         count;
     const char *name;
+    uint32_t    magic;                    /* WAIT_QUEUE_MAGIC while the queue is alive */
 };
+
+/* Set by wait_queue_init. The exit-cleanup registry keeps pointers to queues that
+ * may live on a stack or heap block that is later freed and reused. A registry
+ * entry is only trusted while its memory still carries this magic and a sane count. */
+#define WAIT_QUEUE_MAGIC 0x57514D51u
 
 int  wait_queue_init(struct wait_queue *wq, const char *name);
 

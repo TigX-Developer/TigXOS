@@ -8,7 +8,7 @@
 
 ASM=nasm
 GLC=python3 lizard/glc.py
-VERSION := 1.2.9
+VERSION := 1.3.8
 GL_PROGS = hello echo loop cat rm ls wc writefile lang65 exitn cp mv touch head clear tee sleep basename dirname typed arrdemo strlib importdemo
 GL_ELFS  = $(GL_PROGS:%=user/%.gl.elf)
 CC=gcc
@@ -27,13 +27,14 @@ endif
 
 
 KERNEL_OBJS=entry.o interrupt.o switch.o console.o interrupt_c.o keyboard.o timer.o rtc.o \
-	memory.o string.o process.o filetable.o disk.o fs.o vfs.o ramfs.o spinlock.o wait.o sync.o font.o font_data.o \
-	gdt.o syscall.o pipe.o aspace.o elf.o embed_hello.o test.o tests.o log.o acpi.o lapic.o smp.o kernel.o
+	memory.o string.o process.o kthread.o futex.o filetable.o disk.o fs.o vfs.o ramfs.o spinlock.o wait.o sync.o font.o font_data.o \
+	gdt.o syscall.o pipe.o aspace.o elf.o embed_hello.o test.o tests.o log.o acpi.o lapic.o smp.o hal.o pci.o fb.o mouse.o block.o part.o mount.o xhci.o usb.o hpet.o audio.o ioapic.o ahci.o kernel.o
 
 # Only the shell is still embedded in the kernel image (init). All other
 # user programs live on the TigFS image produced by tools/mktigfs.py.
 # 256 sectors ≈ 128 KB — comfortable headroom for shell + kernel code.
-KERNEL_SECTS=384
+KERNEL_SECTS=511
+# Max 511: boot LBA0, kernel LBA1..511, TigFS superblock at LBA 512 (see tools/mkosimage.py)
 KERNEL_MAX_BYTES=$(shell echo $$(( $(KERNEL_SECTS) * 512 )))
 TIGFS_OFFSET=$$((512 * 512))   # LBA 512 in bytes
 
@@ -68,8 +69,12 @@ TESTS ?= 0
 ifeq ($(TESTS),1)
   CFLAGS += -DTIGX_BOOT_TESTS
 endif
-ifneq ($(shell cat .tests-stamp 2>/dev/null),$(TESTS))
-  $(shell rm -f *.o *.d kernel.elf kernel.bin os-image.bin embed_hello.c; echo $(TESTS) > .tests-stamp)
+# OPT: kernel optimisations. 1.3.8 defaults to -Os so the image stays under the
+# 511-sector bootloader limit (KERNEL_SECTS). Override with: make OPT=
+OPT ?= -Os
+CFLAGS += $(OPT)
+ifneq ($(shell cat .tests-stamp 2>/dev/null),$(TESTS)$(OPT))
+  $(shell rm -f *.o *.d kernel.elf kernel.bin os-image.bin embed_hello.c; echo '$(TESTS)$(OPT)' > .tests-stamp)
 endif
 
 all: os-image.bin
@@ -183,13 +188,13 @@ run-64:
 # Headless automated test run (isa-debug-exit). Exit status:
 #   QEMU rc 1 → all suites passed (qemu_exit(0) → (0<<1)|1)
 #   QEMU rc 3 → one or more checks failed (qemu_exit(1))
-#   timeout 124 → hung (no isa-debug-exit within 35s)
+#   timeout 124 → hung (no isa-debug-exit within 120s)
 test-qemu: os-image.bin
 	@echo "=== test-qemu ARCH=$(ARCH) ==="
 	@rm -f test-$(ARCH).log
 	@echo "  launching: $(QEMU) -m 128 -smp 1 -nographic + isa-debug-exit"
 	@set +e; \
-	timeout --foreground -k 5 35 $(QEMU) -m 128 -smp 1 \
+	timeout --foreground -k 5 120 $(QEMU) -m 128 -smp 1 \
 	  -nographic \
 	  -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 	  -drive file=os-image.bin,format=raw,if=ide,index=0,media=disk \
@@ -210,8 +215,8 @@ test-qemu-64:
 
 # Foundations freeze gate (v1.1.12+): both arches, full test suites
 # See FOUNDATIONS.md — expect 84 checks PASS on i386 and x86_64
-test: test-qemu-32 test-qemu-64
-	@echo "=== both arches green ==="
+test: test-qemu-32 test-qemu-64 test-smp test-smp4
+	@echo "=== both arches + smp2 + smp4 green ==="
 
 # Size report (kernel image vs KERNEL_SECTS, shell vs TigFS max, tigfs.img)
 size: kernel.bin user/shell.elf
@@ -235,16 +240,39 @@ check:
 	$(MAKE) ARCH=i386
 	$(MAKE) ARCH=x86_64
 
-.PHONY: all clean run run-debug run-32 run-64 check test-qemu test-qemu-32 test-qemu-64 test size
+.PHONY: all clean run run-debug run-32 run-64 check test-qemu test-qemu-32 test-qemu-64 test size test-smp-run test-smp4-run
 
 
 
-# Multicore smoke (x86_64 only): boot with 2/4 CPUs, serial log only
-test-smp: ARCH=x86_64
-test-smp: os-image.bin
-	@echo "=== test-smp x86_64 -smp 2 ==="
-	timeout --foreground -k 5 20 qemu-system-x86_64 -m 128 -smp 2 -nographic \
+# Multicore: x86_64 -smp 2 with boot tests (verify concurrent progress)
+# TESTS=1 must be on the make command line (it is read while the makefile is parsed)
+test-smp:
+	$(MAKE) ARCH=x86_64 TESTS=1 test-smp-run
+
+test-smp-run: os-image.bin
+	@echo "=== test-smp x86_64 -smp 2 TESTS=1 ==="
+	@timeout --foreground -k 5 120 qemu-system-x86_64 -m 128 -smp 2 -nographic \
+	  -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 	  -drive file=os-image.bin,format=raw,if=ide,index=0,media=disk \
-	  -serial mon:stdio -display none \
-	  || true
-	@echo "(inspect log for: online in long mode / scheduler idle loop)"
+	  -serial mon:stdio -display none -no-reboot -d cpu_reset,guest_errors -D smp2-debug.log; \
+	  rc=$$?; \
+	  if [ $$rc -eq 1 ]; then echo "RESULT ARCH=x86_64-smp2 PASS"; \
+	  elif [ $$rc -eq 124 ] || [ $$rc -eq 137 ]; then echo "RESULT ARCH=x86_64-smp2 TIMEOUT"; exit 1; \
+	  else echo "RESULT ARCH=x86_64-smp2 FAIL rc=$$rc"; exit 1; fi
+
+
+# Multicore stress: x86_64 -smp 4
+# TESTS=1 must be on the make command line (it is read while the makefile is parsed)
+test-smp4:
+	$(MAKE) ARCH=x86_64 TESTS=1 test-smp4-run
+
+test-smp4-run: os-image.bin
+	@echo "=== test-smp4 x86_64 -smp 4 TESTS=1 ==="
+	@timeout --foreground -k 5 120 qemu-system-x86_64 -m 128 -smp 4 -nographic \
+	  -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+	  -drive file=os-image.bin,format=raw,if=ide,index=0,media=disk \
+	  -serial mon:stdio -display none -no-reboot -d cpu_reset,guest_errors -D smp4-debug.log; \
+	  rc=$$?; \
+	  if [ $$rc -eq 1 ]; then echo "RESULT ARCH=x86_64-smp4 PASS"; \
+	  elif [ $$rc -eq 124 ] || [ $$rc -eq 137 ]; then echo "RESULT ARCH=x86_64-smp4 TIMEOUT"; exit 1; \
+	  else echo "RESULT ARCH=x86_64-smp4 FAIL rc=$$rc"; exit 1; fi

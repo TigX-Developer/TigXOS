@@ -1,13 +1,9 @@
-/* smp.c — SMP bring-up + 1.2.9 IPI/TLB/balance (TigxOS)
+/* smp.c — SMP bring-up, IPI, TLB shootdown, AP park (TigxOS 1.3.8)
  *
- * Robustness:
- *  - Every early-exit path leaves smp_online = 1 and never touches the
- *    trampoline or ICR.
- *  - Mailbox wait is bounded; a silent AP is logged and skipped.
- *  - Trampoline is identity-mapped low RAM that the PMM never hands out.
- *  - i386 / no-LAPIC paths are pure UP — no speculative INIT/SIPI.
+ * x86_64: MADT discovery, SIPI trampoline, AP long-mode entry.
+ * APs load kernel GDT/IDT then park on cli;hlt until full AP scheduling.
+ * i386 / no-LAPIC: pure uniprocessor — no INIT/SIPI.
  */
-
 #include "smp.h"
 #include "acpi.h"
 #include "atomic.h"
@@ -17,6 +13,8 @@
 #include "memory.h"
 #include "arch/arch.h"
 #include "process.h"
+#include "gdt.h"
+#include "interrupt.h"
 #include "string.h"
 #include <stdint.h>
 
@@ -36,6 +34,8 @@ static volatile uint64_t ipi_resched_total;
 static volatile uint64_t ipi_tlb_total;
 static volatile uint64_t balance_steals;
 static volatile int      need_resched[NCPU_MAX];
+static volatile uint32_t  resched_ack_gen[NCPU_MAX];
+static volatile uint32_t  resched_send_gen;
 static volatile int      rq_depth[NCPU_MAX];
 static volatile uintptr_t tlb_shoot_page;   /* 0 = full flush */
 static volatile uint32_t  tlb_shoot_gen;
@@ -60,6 +60,12 @@ struct ap_boot_info {
 #define AP_STACK_SIZE  0x4000
 static uint8_t *ap_stacks[NCPU_MAX];
 
+/* Park target for AP idle context frames (may be resumed by schedule). */
+void ap_idle_park(void) {
+    for (;;)
+        __asm__ volatile("sti; hlt" ::: "memory");
+}
+
 #if defined(__x86_64__)
 /* 64-bit AP entry — runs after trampoline enters long mode. */
 static void ap_main(void) {
@@ -68,8 +74,20 @@ static void ap_main(void) {
     if (id < 0 || id >= NCPU_MAX)
         id = 0;
 
-    if (lapic_present())
+    /*
+     * Critical: trampoline left us on a temporary GDT at 0x8060 and a NULL
+     * IDT. Any sti (or exception) triple-faults. Switch to the BSP kernel
+     * GDT and shared IDT before enabling interrupts or scheduling.
+     */
+    __asm__ volatile("cli" ::: "memory");
+    gdt_load_ap();
+    idt_load();
+
+    /* Bring up this CPU's local APIC (timer stays masked on APs for now). */
+    if (lapic_present()) {
+        lapic_ap_init();
         lapic_eoi();
+    }
 
     process_bind_ap(id);
     ap_ready[id] = 1;
@@ -82,19 +100,15 @@ static void ap_main(void) {
         }
     }
 
-    pr_info("smp: CPU %d (APIC %u) online — scheduler idle loop\n", id, lapic_id());
+    pr_info("smp: CPU %d (APIC %u) online - parked idle (no schedule yet)\n", id, lapic_id());
 
-    /* Cross-core scheduling: schedule() requires IF=0 (same as BSP). */
+    /* Hard park: IF=0. No IPI/timer entry until AP runs a real scheduler. */
     for (;;) {
-        __asm__ volatile("cli" ::: "memory");
-        if (smp_need_resched())
-            smp_clear_need_resched();
-        if (scheduler_is_enabled())
-            schedule();
-        __asm__ volatile("sti; hlt" ::: "memory");
+        __asm__ volatile("cli; hlt" ::: "memory");
     }
 }
 #else
+static void ap_main(void) __attribute__((unused));
 static void ap_main(void) {
     for (;;)
         __asm__ volatile("hlt");
@@ -435,8 +449,20 @@ void smp_send_resched(int cpu) {
     need_resched[cpu] = 1;
     if (cpu == smp_cpu_id())
         return;
+    /* APs are parked (cli;hlt) — do not deliver IPIs or they can fault. */
+    if (cpu != 0)
+        return;
+    resched_send_gen++;
+    uint32_t gen = resched_send_gen;
+    resched_ack_gen[cpu] = 0;
     send_ipi_vector(cpu, IPI_VECTOR_RESCHED);
     ipi_resched_total++;
+    /* Bounded ACK wait — never hang the sender if AP is offline */
+    for (volatile int spin = 0; spin < 20000; spin++) {
+        if (resched_ack_gen[cpu] == gen)
+            break;
+        __asm__ volatile("pause");
+    }
 }
 
 void smp_send_resched_all(void) {
@@ -450,8 +476,10 @@ void smp_send_resched_all(void) {
 
 void smp_ipi_resched_handler(void) {
     int id = smp_cpu_id();
-    if (id >= 0 && id < NCPU_MAX)
+    if (id >= 0 && id < NCPU_MAX) {
         need_resched[id] = 1;
+        resched_ack_gen[id] = resched_send_gen;
+    }
     lapic_eoi();
 }
 
@@ -487,7 +515,7 @@ void smp_tlb_shootdown(uintptr_t page) {
         if (i == self)
             continue;
         tlb_ack_gen[i] = 0;
-        send_ipi_vector(i, IPI_VECTOR_TLB);
+        if (i == 0) send_ipi_vector(i, IPI_VECTOR_TLB); /* skip parked APs */
         ipi_tlb_total++;
     }
     /* Brief wait for acks (APs may still be parked — do not spin forever) */

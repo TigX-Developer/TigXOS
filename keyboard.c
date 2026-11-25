@@ -56,6 +56,12 @@ static void kbd_push(char c) {
     }
 }
 
+void keyboard_inject_char(char c) {
+    kbd_push(c);
+    wait_queue_wake_one(&kbd_waitq);
+}
+
+
 /* Never spin forever — LED updates from IRQ used to hang the kernel. */
 static int kbd_wait_write(void) {
     for (int i = 0; i < 100000; i++)

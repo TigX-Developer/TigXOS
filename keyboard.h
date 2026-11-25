@@ -6,6 +6,9 @@
 #define KEYBOARD_H
 
 void keyboard_init(void);
+/* USB HID / synthetic input may inject ASCII into the same buffer as PS/2. */
+void keyboard_inject_char(char c);
+
 char keyboard_getchar(void);
 int keyboard_has_key(void);
 int keyboard_get_caps_state(void);

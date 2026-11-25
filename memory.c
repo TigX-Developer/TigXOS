@@ -1,4 +1,4 @@
-/* memory.c — PMM / VMM / kernel heap (TigxOS 1.2.0) */
+/* memory.c — PMM / VMM / kernel heap (TigxOS 1.3.8) */
 
 
 
@@ -735,4 +735,50 @@ void memory_print_stats(void) {
     kprintf("\nFrames: total=%d free=%d used=%d\n",
             (uint32_t)total_frames, (uint32_t)free_frames, (uint32_t)used_frames);
     kmalloc_print_stats();
+}
+
+
+/* ---- 1.3.8 DMA-safe contiguous allocator ----
+ * Uses the PMM for physically contiguous frames. Under TigxOS identity
+ * mapping of low memory, the returned virtual address equals the physical
+ * address for frames below 4 GiB. Prefer low frames for 32-bit bus masters.
+ */
+void *dma_alloc_pages(size_t pages, uintptr_t *phys_out)
+{
+    if (pages == 0)
+        return 0;
+    void *p = pmm_alloc_frames(pages);
+    if (!p)
+        return 0;
+    uintptr_t phys = (uintptr_t)p;
+    /* Reject >4GiB for 32-bit DMA devices (should not happen on our PMM). */
+    if (phys >= 0x100000000ULL) {
+        pmm_free_frames(p, pages);
+        return 0;
+    }
+    if (phys_out)
+        *phys_out = phys;
+    return p;
+}
+
+void dma_free_pages(void *ptr, size_t pages)
+{
+    if (ptr && pages)
+        pmm_free_frames(ptr, pages);
+}
+
+void *dma_alloc(size_t size, uintptr_t *phys_out)
+{
+    if (size == 0)
+        return 0;
+    size_t pages = (size + 4095) / 4096;
+    return dma_alloc_pages(pages, phys_out);
+}
+
+void dma_free(void *ptr, size_t size)
+{
+    if (!ptr || size == 0)
+        return;
+    size_t pages = (size + 4095) / 4096;
+    dma_free_pages(ptr, pages);
 }

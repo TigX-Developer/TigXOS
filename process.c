@@ -1,7 +1,8 @@
-/* process.c — preemptive scheduler, wait/kill, fg job, ps snapshot (TigxOS 1.2.3) */
+/* process.c — preemptive scheduler, wait/kill, fg job, ps snapshot (TigxOS 1.3.8) */
 
 
 
+extern char boot_stack_top[]; /* defined in the arch entry.asm (.bss) */
 #include "process.h"
 #include "smp.h"
 #include "filetable.h"
@@ -29,6 +30,10 @@ static int ncpu_online = 1;
 
 /* Protects process_table state transitions and pick_next. */
 static spinlock_t sched_lock;
+int process_group_kill(int tgid, int status);
+
+/* Forward decls for SMP load-balance helpers defined later */
+int process_pick_cpu(void);
 
 /* Round-robin cursor per priority level (CPU 0). */
 static int rr_cursor[PRIO_MAX + 1];
@@ -87,7 +92,7 @@ void process_init(void) {
     strncpy(idle->name, "idle", PROCESS_NAME_LEN - 1);
     idle->stack_base = NULL;
     idle->rsp = NULL;
-    idle->kernel_stack_top = 0x90000; /* bootstrap stack */
+    idle->kernel_stack_top = (uintptr_t)boot_stack_top; /* bootstrap stack (.bss) */
     idle->user_stack_base = NULL;
     idle->is_user = 0;
     idle->time_slice = TIME_SLICE_TICKS;
@@ -352,7 +357,28 @@ int process_prepare_ap_idle(int cpu_id) {
     p->priority = PRIO_IDLE;
     p->time_slice = TIME_SLICE_TICKS;
     p->on_cpu = cpu_id;
-    p->kernel_stack_top = 0; /* AP brings its own stack from smp */
+    /* Real kernel stack so a future context_switch to this idle is safe. */
+    {
+        void *stk = kmalloc(PROCESS_STACK_SIZE);
+        if (stk) {
+            p->stack_base = (uintptr_t *)stk;
+            p->kernel_stack_top = (uintptr_t)stk + PROCESS_STACK_SIZE;
+            /* Fake context_switch frame: 6 saved regs + ret → infinite hlt loop. */
+            extern void ap_idle_park(void);
+            uintptr_t *sp = (uintptr_t *)p->kernel_stack_top;
+            *--sp = (uintptr_t)ap_idle_park; /* ret */
+            *--sp = 0; /* rbp */
+            *--sp = 0; /* rbx */
+            *--sp = 0; /* r12 */
+            *--sp = 0; /* r13 */
+            *--sp = 0; /* r14 */
+            *--sp = 0; /* r15 */
+            p->rsp = sp;
+        } else {
+            p->kernel_stack_top = 0;
+            p->rsp = NULL;
+        }
+    }
     strncpy(p->cwd, "/", PATH_MAX - 1);
     cpus[cpu_id].id = cpu_id;
     cpus[cpu_id].online = 0; /* becomes 1 in process_bind_ap */
@@ -384,6 +410,8 @@ void process_bind_ap(int cpu_id) {
 }
 
 int process_create(const char *name, void (*entry)(void)) {
+    /* IRQs off while the slot is half-built: a timer tick must not schedule it. */
+    unsigned long cf_ = irq_save();
     struct process *p = NULL;
     int slot = -1;
 
@@ -396,7 +424,7 @@ int process_create(const char *name, void (*entry)(void)) {
         }
     }
     if (!p || slot < 0)
-        return -1;
+        { irq_restore(cf_); return -1; }
 
     /* Defensive: free any leftover stack from a previous DEAD occupant */
     if (p->stack_base) {
@@ -406,6 +434,7 @@ int process_create(const char *name, void (*entry)(void)) {
 
     memset(p, 0, sizeof(*p));
     p->pid = slot;                    /* stable: pid == table index */
+    p->tid = slot;
     p->state = PROC_READY;
     if (name)
         strncpy(p->name, name, PROCESS_NAME_LEN - 1);
@@ -416,7 +445,7 @@ int process_create(const char *name, void (*entry)(void)) {
     p->stack_base = (uintptr_t *)kmalloc(PROCESS_STACK_SIZE);
     if (!p->stack_base) {
         memset(p, 0, sizeof(*p));
-        return -1;
+        { irq_restore(cf_); return -1; }
     }
     memset(p->stack_base, 0, PROCESS_STACK_SIZE);
     p->rsp = build_stack(entry, p->stack_base);
@@ -430,7 +459,7 @@ int process_create(const char *name, void (*entry)(void)) {
     p->time_slice = TIME_SLICE_TICKS;
     p->priority = PRIO_DEFAULT;
     p->ticks_ran = 0;
-    p->on_cpu = -1;
+    p->on_cpu = process_pick_cpu(); /* load-balance across online CPUs */
     p->wake_tick = 0;
     if (current && current->cwd[0]) {
         strncpy(p->cwd, current->cwd, PATH_MAX - 1);
@@ -439,6 +468,11 @@ int process_create(const char *name, void (*entry)(void)) {
         strncpy(p->cwd, "/", PATH_MAX - 1);
         p->cwd[PATH_MAX - 1] = '\0';
     }
+    smp_rq_note_ready(1);
+    /* Wake remote CPU if the new task is not local */
+    if (p->on_cpu >= 0 && p->on_cpu != smp_cpu_id() && smp_cpu_count() > 1)
+        smp_send_resched(p->on_cpu);
+    irq_restore(cf_);
     return p->pid;
 }
 
@@ -471,6 +505,8 @@ static uintptr_t *build_user_stack_at(uintptr_t entry, uintptr_t usp,
 }
 
 int process_create_user(const char *name, void (*user_entry)(void)) {
+    /* IRQs off while the slot is half-built: a timer tick must not schedule it. */
+    unsigned long cf_ = irq_save();
     struct process *p = NULL;
     int slot = -1;
 
@@ -483,7 +519,7 @@ int process_create_user(const char *name, void (*user_entry)(void)) {
         }
     }
     if (!p || slot < 0)
-        return -1;
+        { irq_restore(cf_); return -1; }
 
     /* Reclaim a DEAD slot fully (AS + stacks) before reuse */
     if (p->state == PROC_DEAD) {
@@ -510,7 +546,7 @@ int process_create_user(const char *name, void (*user_entry)(void)) {
         if (p->stack_base) kfree(p->stack_base);
         if (p->user_stack_base) kfree(p->user_stack_base);
         memset(p, 0, sizeof(*p));
-        return -1;
+        { irq_restore(cf_); return -1; }
     }
     memset(p->stack_base, 0, PROCESS_STACK_SIZE);
     memset(p->user_stack_base, 0, PROCESS_STACK_SIZE);
@@ -520,6 +556,12 @@ int process_create_user(const char *name, void (*user_entry)(void)) {
     }
     p->kernel_stack_top = (uintptr_t)p->stack_base + PROCESS_STACK_SIZE;
     p->is_user = 1;
+    p->is_thread = 0;
+    p->tgid = p->pid; /* leader */
+    p->tid = p->pid;
+    p->thread_slot = 0;
+    p->tls_base = 0;
+    p->exit_thread_only = 0;
     p->parent_pid = current ? current->pid : -1;
     p->wait_pid = -1;
     p->exit_status = 0;
@@ -536,19 +578,22 @@ int process_create_user(const char *name, void (*user_entry)(void)) {
         strncpy(p->cwd, "/", PATH_MAX - 1);
         p->cwd[PATH_MAX - 1] = '\0';
     }
+    irq_restore(cf_);
     return p->pid;
 }
 
 
 int process_create_user_at(const char *name, uintptr_t entry, uintptr_t user_sp) {
+    /* IRQs off while the slot is half-built: a timer tick must not schedule it. */
+    unsigned long cf_ = irq_save();
     /* user_sp must sit in the user-accessible identity window */
     if (user_sp < 0x400000UL || user_sp >= 0x04000000UL) {
         kprintf("process: bad user_sp %p\n", (void *)user_sp);
-        return -1;
+        { irq_restore(cf_); return -1; }
     }
     if (entry < 0x400000UL || entry >= 0x04000000UL) {
         kprintf("process: bad user entry %p\n", (void *)entry);
-        return -1;
+        { irq_restore(cf_); return -1; }
     }
 
     struct process *p = NULL;
@@ -563,7 +608,7 @@ int process_create_user_at(const char *name, uintptr_t entry, uintptr_t user_sp)
         }
     }
     if (!p || slot < 0)
-        return -1;
+        { irq_restore(cf_); return -1; }
 
     if (p->stack_base) { kfree(p->stack_base); p->stack_base = NULL; }
     if (p->user_stack_base) { kfree(p->user_stack_base); p->user_stack_base = NULL; }
@@ -580,13 +625,19 @@ int process_create_user_at(const char *name, uintptr_t entry, uintptr_t user_sp)
     p->stack_base = (uintptr_t *)kmalloc(PROCESS_STACK_SIZE);
     if (!p->stack_base) {
         memset(p, 0, sizeof(*p));
-        return -1;
+        { irq_restore(cf_); return -1; }
     }
     memset(p->stack_base, 0, PROCESS_STACK_SIZE);
     p->user_stack_base = NULL; /* caller may attach later */
     p->rsp = build_user_stack_at(entry, user_sp, p->stack_base);
     p->kernel_stack_top = (uintptr_t)p->stack_base + PROCESS_STACK_SIZE;
     p->is_user = 1;
+    p->is_thread = 0;
+    p->tgid = p->pid; /* leader */
+    p->tid = p->pid;
+    p->thread_slot = 0;
+    p->tls_base = 0;
+    p->exit_thread_only = 0;
     p->parent_pid = current ? current->pid : -1;
     p->wait_pid = -1;
     p->exit_status = 0;
@@ -603,6 +654,7 @@ int process_create_user_at(const char *name, uintptr_t entry, uintptr_t user_sp)
         strncpy(p->cwd, "/", PATH_MAX - 1);
         p->cwd[PATH_MAX - 1] = '\0';
     }
+    irq_restore(cf_);
     return p->pid;
 }
 
@@ -780,6 +832,14 @@ int spawn(const char *path, char *const argv[], char *const envp[]) {
  * Never touch the process we are currently executing on.
  */
 /* Free stacks and mark UNUSED. Caller must hold the only reference (wait or orphan). */
+void process_reap_pid(int pid) {
+    if (pid <= 0 || pid >= MAX_PROCESSES)
+        return;
+    struct process *p = &process_table[pid];
+    if (p->state == PROC_DEAD && p != process_current())
+        process_finalize(p);
+}
+
 static void process_finalize(struct process *p) {
     if (!p)
         return;
@@ -792,7 +852,7 @@ static void process_finalize(struct process *p) {
         p->user_stack_base = NULL;
     }
     if (p->as) {
-        aspace_destroy(p->as);
+        aspace_unref(p->as); /* last thread to exit frees the shared AS */
         p->as = NULL;
         p->heap_brk = 0;
         p->heap_limit = USER_HEAP_LIMIT;
@@ -802,6 +862,11 @@ static void process_finalize(struct process *p) {
     p->time_slice = 0;
     p->wait_pid = -1;
     p->parent_pid = -1;
+    p->is_kthread = 0;
+    p->joinable = 0;
+    p->joiner_pid = -1;
+    p->kthread_fn = NULL;
+    p->kthread_arg = NULL;
     p->name[0] = '\0';
     p->state = PROC_UNUSED;
 }
@@ -830,6 +895,9 @@ static void process_reap(void) {
     for (int i = 1; i < MAX_PROCESSES; i++) {
         struct process *p = &process_table[i];
         if (p->state != PROC_DEAD || p == current)
+            continue;
+        /* 1.2.10: joinable kthreads wait for kthread_join before reaping */
+        if (p->is_kthread && p->joinable)
             continue;
         int orphan = 1;
         if (p->parent_pid > 0 && p->parent_pid < MAX_PROCESSES) {
@@ -877,6 +945,17 @@ void process_exit(int status) {
         return;
 
     /*
+     * 1.2.11: process exit kills the whole thread group unless this is a
+     * single-thread exit (process_thread_exit / SYS_THREAD_EXIT).
+     */
+    if (!current->exit_thread_only && current->is_user) {
+        int g = current->tgid > 0 ? current->tgid : current->pid;
+        process_group_kill(g, status);
+    }
+    current->exit_thread_only = 0;
+
+
+    /*
      * Do NOT free the stack here — we are still running on it.
      * Mark DEAD, drop from every wait queue, then schedule away.
      * process_reap() finishes the cleanup after the switch.
@@ -909,6 +988,15 @@ void process_exit(int status) {
     current->state = PROC_DEAD;
     current->wake_tick = 0;
     process_wake_waiters(current->pid);
+    /* Wake a kthread joiner if one is blocked on us */
+    if (current->is_kthread && current->joiner_pid > 0) {
+        struct process *j = process_lookup_pid(current->joiner_pid);
+        if (j && j->state == PROC_BLOCKED) {
+            j->state = PROC_READY;
+            j->wake_tick = 0;
+            j->wait_pid = -1;
+        }
+    }
 
     unsigned long __eflags = irq_save();
     schedule();
@@ -1105,6 +1193,7 @@ int process_snapshot(void *out_procs, int max) {
     /* Layout matches struct sys_proc_info in syscall.h */
     struct {
         int32_t pid, ppid, state, is_user, exit_status;
+        int32_t tgid, tid, is_thread;
         char name[32];
     } *out = out_procs;
     int n = 0;
@@ -1117,6 +1206,9 @@ int process_snapshot(void *out_procs, int max) {
         out[n].state = (int32_t)p->state;
         out[n].is_user = p->is_user;
         out[n].exit_status = p->exit_status;
+        out[n].tgid = p->tgid ? p->tgid : p->pid;
+        out[n].tid = p->tid ? p->tid : p->pid;
+        out[n].is_thread = p->is_thread;
         int j;
         for (j = 0; j < 31 && p->name[j]; j++)
             out[n].name[j] = p->name[j];
@@ -1152,6 +1244,24 @@ static void balance_steals_local(void) {
     smp_note_steal();
 }
 
+static struct process *cpu_idle_task(int cpu) {
+    /* Prefer the process bound as this CPU's idle in cpus[]. */
+    if (cpu >= 0 && cpu < NCPU_MAX && cpus[cpu].cur &&
+        cpus[cpu].cur->priority == PRIO_IDLE)
+        return cpus[cpu].cur;
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        struct process *p = &process_table[i];
+        if (p->priority == PRIO_IDLE &&
+            (p->state == PROC_READY || p->state == PROC_RUNNING) &&
+            p->on_cpu == cpu)
+            return p;
+    }
+    /* BSP fallback */
+    if (cpu == 0)
+        return &process_table[0];
+    return NULL;
+}
+
 static struct process *pick_next(void) {
     int self = smp_cpu_id();
     if (self < 0 || self >= NCPU_MAX)
@@ -1159,6 +1269,8 @@ static struct process *pick_next(void) {
 
     /* Pass 1: highest-priority READY preferred on this CPU (or unassigned). */
     for (int prio = PRIO_MAX; prio >= PRIO_MIN; prio--) {
+        if (prio == PRIO_IDLE)
+            continue; /* idle only as true fallback */
         int start = rr_cursor[prio];
         for (int n = 0; n < MAX_PROCESSES; n++) {
             int i = (start + n) % MAX_PROCESSES;
@@ -1173,25 +1285,60 @@ static struct process *pick_next(void) {
         }
     }
 
-    /* Pass 2: steal a READY task from another CPU (load balance). */
-    for (int prio = PRIO_MAX; prio >= PRIO_MIN; prio--) {
-        for (int i = 0; i < MAX_PROCESSES; i++) {
-            struct process *p = &process_table[i];
-            if (p->state == PROC_READY && p->priority == prio &&
-                p->on_cpu != self && p->pid != 0) {
-                p->on_cpu = self;
-                balance_steals_local();
-                return p;
+    /* Pass 2: steal a READY non-idle task from the busiest other CPU. */
+    {
+        int best_cpu = -1;
+        int best_depth = -1;
+        for (int c = 0; c < NCPU_MAX; c++) {
+            if (c == self || !cpus[c].online)
+                continue;
+            int d = smp_rq_depth(c);
+            if (d > best_depth) {
+                best_depth = d;
+                best_cpu = c;
+            }
+        }
+        /* Prefer victims on the busiest CPU; then any remote READY. */
+        for (int pass = 0; pass < 2; pass++) {
+            for (int prio = PRIO_MAX; prio >= PRIO_MIN; prio--) {
+                if (prio == PRIO_IDLE)
+                    continue;
+                for (int i = 0; i < MAX_PROCESSES; i++) {
+                    struct process *p = &process_table[i];
+                    if (p->state != PROC_READY || p->priority != prio)
+                        continue;
+                    if (p->on_cpu == self || p->pid == 0)
+                        continue;
+                    /* Do not steal tasks placed on parked APs (or from them). */
+                    if (p->on_cpu > 0)
+                        continue;
+                    if (pass == 0 && best_cpu >= 0 && p->on_cpu != best_cpu)
+                        continue;
+                    p->on_cpu = self;
+                    balance_steals_local();
+                    smp_rq_note_ready(-1); /* approximate: one less elsewhere */
+                    return p;
+                }
             }
         }
     }
 
-    /* Fallback: idle (pid 0). Force READY if somehow invalid. */
+    /* Fallback: THIS CPU's idle only — never share process_table[0] across cores. */
+    {
+        struct process *idle = cpu_idle_task(self);
+        if (idle) {
+            if (idle->state != PROC_READY && idle->state != PROC_RUNNING)
+                idle->state = PROC_READY;
+            idle->priority = PRIO_IDLE;
+            idle->on_cpu = self;
+            return idle;
+        }
+    }
     if (process_table[0].state != PROC_READY &&
         process_table[0].state != PROC_RUNNING)
         process_table[0].state = PROC_READY;
     process_table[0].priority = PRIO_IDLE;
-    process_table[0].on_cpu = self;
+    process_table[0].on_cpu = 0;
     return &process_table[0];
 }
 
@@ -1206,12 +1353,15 @@ void schedule(void) {
         return;
     process_reap();
     /* Demote first so pick_next can re-select us at our priority. */
+    spin_lock(&sched_lock);
     if (current->state == PROC_RUNNING)
         current->state = PROC_READY;
+    smp_rq_note_ready(current->state == PROC_READY ? 0 : 0);
     struct process *next = pick_next();
     if (next == current) {
         current->state = PROC_RUNNING;
         current->time_slice = TIME_SLICE_TICKS;
+        spin_unlock(&sched_lock);
         return;
     }
     struct process *prev = current;
@@ -1224,12 +1374,14 @@ void schedule(void) {
         cd->cur = next;
         cd->switches++;
     }
+    spin_unlock(&sched_lock);
     if (next->as)
         aspace_switch(next->as);
     else
         aspace_switch(aspace_kernel());
+    process_load_tls(next);
     /* Privilege-change IRQs need a valid ring-0 stack in the TSS */
-    tss_set_kernel_stack(next->kernel_stack_top ? next->kernel_stack_top : 0x90000);
+    tss_set_kernel_stack(next->kernel_stack_top ? next->kernel_stack_top : (uintptr_t)boot_stack_top);
     context_switch(&prev->rsp, next->rsp);
     /* Now running as next; safe to free any DEAD stacks (including prev) */
     process_reap();
@@ -1287,4 +1439,415 @@ void process_reset_ticks(void) {
         process_table[i].ticks_ran = 0;
     cpus[0].ticks = 0;
     irq_restore(flags);
+}
+
+
+/* ---- 1.2.9: affinity + load pick ---- */
+
+int process_pick_cpu(void) {
+    /* Until APs run the scheduler, pin every new task to the BSP. */
+    return 0;
+}
+
+int process_set_affinity(int pid, int cpu) {
+    if (cpu < -1 || cpu >= NCPU_MAX)
+        return -1;
+    if (cpu >= 0 && !cpus[cpu].online && smp_cpu_count() > 1)
+        return -1;
+    struct process *p = process_lookup_pid(pid);
+    if (!p || p->priority == PRIO_IDLE)
+        return -1;
+    unsigned long flags = irq_save();
+    spin_lock(&sched_lock);
+    int old = p->on_cpu;
+    p->on_cpu = cpu;
+    spin_unlock(&sched_lock);
+    irq_restore(flags);
+    if (cpu >= 0 && cpu != smp_cpu_id() && p->state == PROC_READY)
+        smp_send_resched(cpu);
+    else if (old >= 0 && old != smp_cpu_id() && cpu != old)
+        smp_send_resched(old);
+    return 0;
+}
+
+int process_get_affinity(int pid) {
+    struct process *p = process_lookup_pid(pid);
+    if (!p)
+        return -1;
+    return p->on_cpu;
+}
+
+
+/* ---- 1.2.10 kthread join helpers (need process_table visibility) ---- */
+int kthread_slot_join(int tid, int *status) {
+    if (tid <= 0 || tid >= MAX_PROCESSES)
+        return -1;
+    struct process *self = process_current();
+    if (!self || self->pid == tid)
+        return -1;
+
+    for (;;) {
+        struct process *p = &process_table[tid];
+        if (p->pid != tid || (!p->is_kthread && p->state != PROC_DEAD))
+            return -1;
+        if (p->state == PROC_UNUSED)
+            return -1;
+
+        if (p->state == PROC_DEAD) {
+            if (!p->is_kthread)
+                return -1;
+            int st = p->exit_status;
+            if (status)
+                *status = st;
+            p->joinable = 0;
+            p->joiner_pid = -1;
+            process_finalize(p);
+            return 0;
+        }
+
+        if (!p->is_kthread)
+            return -1;
+        if (!p->joinable)
+            return -1;
+
+        p->joiner_pid = self->pid;
+        {
+            unsigned long flags = irq_save();
+            self->state = PROC_BLOCKED;
+            self->wake_tick = 0;
+            self->wait_pid = tid;
+            schedule();
+            irq_restore(flags);
+        }
+    }
+}
+
+int kthread_slot_detach(int tid) {
+    if (tid <= 0 || tid >= MAX_PROCESSES)
+        return -1;
+    struct process *p = &process_table[tid];
+    if (p->pid != tid || !p->is_kthread)
+        return -1;
+    if (p->state == PROC_UNUSED)
+        return -1;
+    p->joinable = 0;
+    p->joiner_pid = -1;
+    if (p->state == PROC_DEAD)
+        process_finalize(p);
+    return 0;
+}
+
+
+/* ---- 1.2.11 user threads ---- */
+
+void process_load_tls(struct process *p) {
+    if (!p)
+        return;
+    uintptr_t base = p->tls_base;
+#if defined(__x86_64__)
+    /* Never feed WRMSR a non-canonical address (that raises #GP in ring 0),
+     * and kernel tasks have no user TLS. */
+    if (!p->is_user ||
+        ((base >> 47) != 0 && (base >> 47) != 0x1FFFF))
+        base = 0;
+    /* IA32_FS_BASE */
+    uint32_t lo = (uint32_t)base;
+    uint32_t hi = (uint32_t)(base >> 32);
+    __asm__ volatile("wrmsr" : : "c"(0xC0000100u), "a"(lo), "d"(hi) : "memory");
+#elif defined(__i386__)
+    /* Best-effort: store for user code; full GS base needs a GDT TLS entry.
+     * Secondary threads still run; libc TLS is limited on i386 until GDT slot. */
+    (void)base;
+#endif
+}
+
+int process_thread_create(void (*entry)(void), uintptr_t user_stack) {
+    /* IRQs off while the slot is half-built: a timer tick must not schedule it. */
+    unsigned long cf_ = irq_save();
+    if (!entry || !current || !current->is_user || !current->as)
+        { irq_restore(cf_); return -1; }
+    /* entry must be in the user window (checked again in syscall) */
+    if ((uintptr_t)entry < ASPACE_USER_MIN || (uintptr_t)entry >= ASPACE_USER_MAX)
+        { irq_restore(cf_); return -1; }
+
+    int leader = current->tgid > 0 ? current->tgid : current->pid;
+
+    spin_lock(&sched_lock);
+
+    int used[USER_THREAD_STACK_SLOTS + 1];
+    for (int i = 0; i <= USER_THREAD_STACK_SLOTS; i++)
+        used[i] = 0;
+    for (int i = 1; i < MAX_PROCESSES; i++) {
+        struct process *q = &process_table[i];
+        if (q->state == PROC_UNUSED || q->state == PROC_DEAD)
+            continue;
+        if (q->tgid == leader || q->pid == leader)
+            if (q->thread_slot >= 0 && q->thread_slot <= USER_THREAD_STACK_SLOTS)
+                used[q->thread_slot] = 1;
+    }
+    int slot = -1;
+    for (int s = 1; s <= USER_THREAD_STACK_SLOTS; s++) {
+        if (!used[s]) { slot = s; break; }
+    }
+    if (slot < 0) {
+        spin_unlock(&sched_lock);
+        { irq_restore(cf_); return -1; }
+    }
+
+    uintptr_t usp = user_stack;
+    if (usp == 0) {
+        usp = aspace_map_thread_stack(current->as, slot);
+        if (!usp) {
+            spin_unlock(&sched_lock);
+            { irq_restore(cf_); return -1; }
+        }
+    } else {
+        if (usp < ASPACE_USER_MIN || usp > ASPACE_USER_MAX) {
+            spin_unlock(&sched_lock);
+            { irq_restore(cf_); return -1; }
+        }
+    }
+
+    struct process *p = NULL;
+    int slot_i = -1;
+    for (int i = 1; i < MAX_PROCESSES; i++) {
+        if (process_table[i].state == PROC_UNUSED ||
+            process_table[i].state == PROC_DEAD) {
+            if (process_table[i].state == PROC_DEAD)
+                process_finalize(&process_table[i]);
+            p = &process_table[i];
+            slot_i = i;
+            break;
+        }
+    }
+    if (!p) {
+        spin_unlock(&sched_lock);
+        { irq_restore(cf_); return -1; }
+    }
+
+    static uint32_t thr_gen_seq;
+    thr_gen_seq++;
+    if (thr_gen_seq == 0)
+        thr_gen_seq = 1;
+
+    memset(p, 0, sizeof(*p));
+    p->pid = slot_i;
+    p->state = PROC_READY;
+    strncpy(p->name, current->name, PROCESS_NAME_LEN - 1);
+    p->stack_base = (uintptr_t *)kmalloc(PROCESS_STACK_SIZE);
+    if (!p->stack_base) {
+        memset(p, 0, sizeof(*p));
+        spin_unlock(&sched_lock);
+        { irq_restore(cf_); return -1; }
+    }
+    memset(p->stack_base, 0, PROCESS_STACK_SIZE);
+    p->rsp = build_user_stack_at((uintptr_t)entry, usp, p->stack_base);
+    p->kernel_stack_top = (uintptr_t)p->stack_base + PROCESS_STACK_SIZE;
+    p->user_stack_base = NULL;
+    p->is_user = 1;
+    p->is_thread = 1;
+    p->tgid = leader;
+    p->thread_slot = slot;
+    p->tls_base = current->tls_base;
+    p->parent_pid = leader;
+    p->wait_pid = -1;
+    p->exit_status = 0;
+    p->exit_thread_only = 0;
+    p->thr_gen = thr_gen_seq;
+    p->priority = current->priority;
+    p->time_slice = TIME_SLICE_TICKS;
+    p->on_cpu = process_pick_cpu();
+    p->as = current->as;
+    aspace_ref(p->as);
+    if (current->group) process_group_bind_thread(current, p); /* shared AS refcount */
+    p->heap_brk = current->heap_brk;
+    p->heap_limit = current->heap_limit;
+    strncpy(p->cwd, current->cwd, PATH_MAX - 1);
+
+    for (int fd = 0; fd < MAX_FDS; fd++) {
+        p->fds[fd].of_id = -1;
+        int oid = current->fds[fd].of_id;
+        if (oid >= 0) {
+            of_incref(oid);
+            p->fds[fd].of_id = oid;
+        }
+    }
+
+    smp_rq_note_ready(1);
+    int tid = p->pid;
+    int remote = p->on_cpu;
+    spin_unlock(&sched_lock);
+
+    if (remote != smp_cpu_id() && smp_cpu_count() > 1)
+        smp_send_resched(remote);
+    irq_restore(cf_);
+    return tid;
+}
+
+void process_thread_exit(int status) {
+    if (!current)
+        return;
+    /* Flag lives on the exiting thread — process_exit never returns. */
+    current->exit_thread_only = 1;
+    process_exit(status);
+}
+
+int process_thread_join(int tid, int *status) {
+    if (tid <= 0 || tid >= MAX_PROCESSES)
+        return -1;
+    struct process *self = process_current();
+    if (!self || self->pid == tid)
+        return -1;
+
+    /* Capture generation under lock so a reused slot cannot satisfy the join. */
+    spin_lock(&sched_lock);
+    struct process *p0 = &process_table[tid];
+    if (p0->pid != tid || p0->state == PROC_UNUSED) {
+        spin_unlock(&sched_lock);
+        return -1;
+    }
+    if (!p0->is_thread && p0->state != PROC_DEAD) {
+        spin_unlock(&sched_lock);
+        return -1;
+    }
+    int my_tgid = self->tgid > 0 ? self->tgid : self->pid;
+    if (p0->tgid != my_tgid && p0->tgid != self->pid) {
+        spin_unlock(&sched_lock);
+        return -1;
+    }
+    uint32_t want_gen = p0->thr_gen;
+    spin_unlock(&sched_lock);
+
+    for (;;) {
+        spin_lock(&sched_lock);
+        struct process *p = &process_table[tid];
+        if (p->pid != tid || p->thr_gen != want_gen) {
+            spin_unlock(&sched_lock);
+            return -1; /* slot reused — original target is gone */
+        }
+        if (p->state == PROC_UNUSED) {
+            spin_unlock(&sched_lock);
+            return -1;
+        }
+        if (p->state == PROC_DEAD) {
+            int st = p->exit_status;
+            if (status)
+                *status = st;
+            /* finalize unrefs AS; leave as attached until then */
+            process_finalize(p);
+            spin_unlock(&sched_lock);
+            return 0;
+        }
+        spin_unlock(&sched_lock);
+        {
+            unsigned long flags = irq_save();
+            self->state = PROC_BLOCKED;
+            self->wake_tick = 0;
+            self->wait_pid = tid;
+            schedule();
+            irq_restore(flags);
+        }
+    }
+}
+
+int process_group_kill(int tgid, int status) {
+    if (tgid <= 0)
+        return -1;
+    int killed = 0;
+    spin_lock(&sched_lock);
+    for (int i = 1; i < MAX_PROCESSES; i++) {
+        struct process *p = &process_table[i];
+        if (p->state == PROC_UNUSED || p->state == PROC_DEAD)
+            continue;
+        if (p->pid == tgid || p->tgid == tgid) {
+            if (p == current)
+                continue; /* current exits after */
+            if (p->is_user) {
+                for (int fd = 0; fd < MAX_FDS; fd++)
+                    fd_close(p, fd);
+                wait_queue_remove_pid(p->pid);
+                p->exit_status = status & 0xff;
+                p->state = PROC_DEAD;
+                p->wake_tick = 0;
+                process_wake_waiters(p->pid);
+                /* Keep p->as so finalize/unref frees the shared AS correctly */
+                killed++;
+            }
+        }
+    }
+    spin_unlock(&sched_lock);
+    return killed;
+}
+
+
+/* ---- 1.3.7 true process-group allocations ---- */
+static struct proc_group group_table[MAX_PROC_GROUPS];
+
+struct proc_group *process_group_create(int tgid)
+{
+    for (int i = 0; i < MAX_PROC_GROUPS; i++) {
+        if (!group_table[i].used) {
+            memset(&group_table[i], 0, sizeof(group_table[i]));
+            group_table[i].used = 1;
+            group_table[i].tgid = tgid;
+            group_table[i].refcount = 1;
+            group_table[i].cwd[0] = '/';
+            group_table[i].cwd[1] = 0;
+            return &group_table[i];
+        }
+    }
+    return 0;
+}
+
+void process_group_ref(struct proc_group *g)
+{
+    if (g) g->refcount++;
+}
+
+void process_group_unref(struct proc_group *g)
+{
+    if (!g) return;
+    if (--g->refcount > 0) return;
+    if (g->as) {
+        aspace_destroy(g->as);
+        g->as = 0;
+    }
+    memset(g, 0, sizeof(*g));
+}
+
+struct proc_group *process_group_of(struct process *t)
+{
+    return t ? t->group : 0;
+}
+
+/* Bind a newly created leader thread to a fresh group (call after pid/tgid set). */
+void process_group_bind_leader(struct process *p, struct address_space *as)
+{
+    if (!p) return;
+    struct proc_group *g = process_group_create(p->pid);
+    if (!g) {
+        p->group = 0;
+        return;
+    }
+    g->as = as;
+    p->group = g;
+    p->as = as;
+    if (!p->group) process_group_bind_leader(p, as); /* compat mirror */
+    /* copy cwd default */
+    if (p->cwd[0]) {
+        int i;
+        for (i = 0; i < PATH_MAX - 1 && p->cwd[i]; i++)
+            g->cwd[i] = p->cwd[i];
+        g->cwd[i] = 0;
+    }
+}
+
+void process_group_bind_thread(struct process *leader, struct process *thr)
+{
+    if (!leader || !thr || !leader->group) return;
+    process_group_ref(leader->group);
+    thr->group = leader->group;
+    thr->as = leader->group->as;
+    thr->tgid = leader->group->tgid;
+    thr->is_thread = 1;
 }

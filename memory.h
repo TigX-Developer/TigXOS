@@ -88,6 +88,16 @@ int   heap_validate(void);       /* 0 = ok, -1 = corrupt */
 size_t kmalloc_outstanding(void); /* allocs - frees */
 size_t kmalloc_peak(void);
 
+/* ---- 1.3.8 DMA-safe allocator ----
+ * Contiguous physical frames suitable for device DMA (AHCI, xHCI, audio, GPU).
+ * Prefer addresses below 4 GiB (32-bit bus masters). Returns virtual pointer;
+ * *phys_out receives the physical base (may equal virt under identity map).
+ */
+void *dma_alloc(size_t size, uintptr_t *phys_out);
+void  dma_free(void *ptr, size_t size);
+void *dma_alloc_pages(size_t pages, uintptr_t *phys_out);
+void  dma_free_pages(void *ptr, size_t pages);
+
 void memory_test(void);
 void memory_print_stats(void);
 #endif

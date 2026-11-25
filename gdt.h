@@ -18,6 +18,7 @@
 #define USER_DS         (GDT_USER_DS | 3)
 
 void gdt_init(void);
+void gdt_load_ap(void);   /* x86_64 only: AP switches to the kernel GDT (no TSS) */
 
 /* Point TSS privilege-0 stack at this kernel stack top (call before user entry
  * and on every context switch into a task that may be preempted in user mode). */

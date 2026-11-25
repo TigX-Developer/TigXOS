@@ -1,4 +1,4 @@
-/* interrupt.c — IDT, PIC, exception/IRQ dispatch (TigxOS 1.2.0) */
+/* interrupt.c — IDT, PIC, exception/IRQ dispatch (TigxOS 1.3.8) */
 
 
 
@@ -27,6 +27,8 @@
 // IDT and handlers
 static struct idt_entry idt[IDT_SIZE];
 static struct idt_ptr idtp;
+
+void idt_load(void) { load_idt(&idtp); }   /* APs load the BSP's IDT */
 static isr_handler_t handlers[IDT_SIZE];
 
 // Exception names

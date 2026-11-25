@@ -1,4 +1,4 @@
-; arch/x86_64/interrupt.asm — ISR + IRQ stubs (TigxOS 1.2.0)
+; arch/x86_64/interrupt.asm — ISR + IRQ stubs (TigxOS 1.3.8)
 ; Stack alignment: SysV requires RSP % 16 == 0 immediately before CALL.
 ; CPL0 vs CPL3 frames differ by 16 bytes, so we save the real frame pointer
 ; and force-align a scratch RSP for the C call, then restore.

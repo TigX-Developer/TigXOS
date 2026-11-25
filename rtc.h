@@ -1,4 +1,4 @@
-/* rtc.h — CMOS RTC (MC146818) for TigxOS 1.1.12 */
+/* rtc.h — CMOS RTC (MC146818) for TigxOS 1.3.8 */
 
 
 #ifndef TIGX_RTC_H

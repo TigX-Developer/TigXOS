@@ -1,6 +1,6 @@
 
 
-/* syscall.c — int 0x80 dispatcher (TigxOS 1.2.4, ABI v1) */
+/* syscall.c — int 0x80 dispatcher (TigxOS 1.3.8, ABI v1) */
 #include "syscall.h"
 #include "io.h"
 #include "interrupt.h"
@@ -13,6 +13,7 @@
 #include "vfs.h"
 #include "pipe.h"
 #include "aspace.h"
+#include "futex.h"
 #include "string.h"
 #include "memory.h"
 #include "rtc.h"
@@ -964,6 +965,61 @@ static void syscall_dispatch(struct interrupt_frame *frame) {
     case SYS_REBOOT:
         ret = (uint32_t)sys_reboot(cur);
         break;
+    case SYS_CLONE: {
+        uintptr_t entry = (uintptr_t)a0;
+        uintptr_t stack = (uintptr_t)a1;
+        if (!entry || entry < ASPACE_USER_MIN || entry >= ASPACE_USER_MAX)
+            ret = (uint32_t)SY_EINVAL;
+        else if (stack != 0 && (stack < ASPACE_USER_MIN || stack > ASPACE_USER_MAX))
+            ret = (uint32_t)SY_EINVAL;
+        else {
+            int tid = process_thread_create((void (*)(void))entry, stack);
+            ret = (uint32_t)(tid > 0 ? tid : SY_ERR);
+        }
+        break;
+    }
+    case SYS_THREAD_EXIT:
+        process_thread_exit((int)a0);
+        ret = 0;
+        break;
+    case SYS_THREAD_JOIN: {
+        int tid = (int)a0;
+        int status = 0;
+        if (a1) {
+            if (!cur || !cur->as ||
+                !aspace_user_range_writable(cur->as, (uintptr_t)a1, sizeof(int))) {
+                ret = (uint32_t)SY_EFAULT;
+                break;
+            }
+        }
+        int r = process_thread_join(tid, a1 ? &status : NULL);
+        if (r == 0) {
+            if (a1)
+                *(int *)(uintptr_t)a1 = status;
+            ret = 0;
+        } else
+            ret = (uint32_t)SY_ERR;
+        break;
+    }
+    case SYS_SET_TLS: {
+        if (!cur)
+            ret = (uint32_t)SY_ERR;
+        else {
+            cur->tls_base = (uintptr_t)a0;
+            process_load_tls(cur);
+            ret = 0;
+        }
+        break;
+    }
+    case SYS_GETTID:
+        ret = cur ? (uint32_t)cur->pid : (uint32_t)SY_ERR;
+        break;
+    case SYS_FUTEX: {
+        /* a0=uaddr a1=op a2=val  (timeout = 0 / infinite in 1.2.12) */
+        ret = (uint32_t)futex_do((uintptr_t)a0, (int)a1, (int)a2, 0);
+        break;
+    }
+
     default:
         ret = (uint32_t)SY_ENOSYS;
         break;
@@ -1070,6 +1126,60 @@ static void syscall_dispatch(struct interrupt_frame *frame) {
     case SYS_REBOOT:
         ret = (uint64_t)sys_reboot(cur);
         break;
+    case SYS_CLONE: {
+        uintptr_t entry = (uintptr_t)a0;
+        uintptr_t stack = (uintptr_t)a1;
+        if (!entry || entry < ASPACE_USER_MIN || entry >= ASPACE_USER_MAX)
+            ret = (uint64_t)SY_EINVAL;
+        else if (stack != 0 && (stack < ASPACE_USER_MIN || stack > ASPACE_USER_MAX))
+            ret = (uint64_t)SY_EINVAL;
+        else {
+            int tid = process_thread_create((void (*)(void))entry, stack);
+            ret = (uint64_t)(tid > 0 ? tid : SY_ERR);
+        }
+        break;
+    }
+    case SYS_THREAD_EXIT:
+        process_thread_exit((int)a0);
+        ret = 0;
+        break;
+    case SYS_THREAD_JOIN: {
+        int tid = (int)a0;
+        int status = 0;
+        if (a1) {
+            if (!cur || !cur->as ||
+                !aspace_user_range_writable(cur->as, (uintptr_t)a1, sizeof(int))) {
+                ret = (uint64_t)SY_EFAULT;
+                break;
+            }
+        }
+        int r = process_thread_join(tid, a1 ? &status : NULL);
+        if (r == 0) {
+            if (a1)
+                *(int *)(uintptr_t)a1 = status;
+            ret = 0;
+        } else
+            ret = (uint64_t)SY_ERR;
+        break;
+    }
+    case SYS_SET_TLS: {
+        if (!cur)
+            ret = (uint64_t)SY_ERR;
+        else {
+            cur->tls_base = (uintptr_t)a0;
+            process_load_tls(cur);
+            ret = 0;
+        }
+        break;
+    }
+    case SYS_GETTID:
+        ret = cur ? (uint64_t)cur->pid : (uint64_t)SY_ERR;
+        break;
+    case SYS_FUTEX: {
+        ret = (uint64_t)futex_do((uintptr_t)a0, (int)a1, (int)a2, 0);
+        break;
+    }
+
     default:
         ret = (uint64_t)SY_ENOSYS;
         break;

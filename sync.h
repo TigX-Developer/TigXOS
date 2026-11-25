@@ -1,10 +1,11 @@
 
 
-// sync.h - Mutex and semaphore for TigxOS 1.1.12
+// sync.h - Mutex and semaphore for TigxOS 1.3.8
 #ifndef SYNC_H
 #define SYNC_H
 
 #include "wait.h"
+#include "spinlock.h"
 
 /*
  * Mutex: exclusive ownership, non-recursive.
@@ -39,3 +40,15 @@ int  sem_post(struct semaphore *s);     /* 0 = ok, -1 = would overflow */
 int  sem_trywait(struct semaphore *s);  /* 1 = got it, 0 = would block */
 
 #endif
+
+/* 1.2.12-gap: read-write lock (writer exclusive, concurrent readers) */
+struct rwlock {
+    spinlock_t lock;
+    int readers;       /* >0 readers; -1 writer */
+    struct wait_queue wq;
+    const char *name;
+};
+void rwlock_init(struct rwlock *rw, const char *name);
+void rwlock_rdlock(struct rwlock *rw);
+void rwlock_wrlock(struct rwlock *rw);
+void rwlock_unlock(struct rwlock *rw);

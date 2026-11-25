@@ -1,4 +1,4 @@
-/* log.c — dmesg ring buffer + leveled logging (TigxOS 1.2.5 final) */
+/* log.c — dmesg ring buffer + leveled logging (TigxOS 1.3.8 final) */
 
 #include "log.h"
 #include "console.h"

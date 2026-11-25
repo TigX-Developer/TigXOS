@@ -1,4 +1,4 @@
-/* log.h — dmesg ring buffer + leveled logging (TigxOS 1.2.5) */
+/* log.h — dmesg ring buffer + leveled logging (TigxOS 1.3.8) */
 #ifndef TIGX_LOG_H
 #define TIGX_LOG_H
 

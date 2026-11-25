@@ -1,4 +1,4 @@
-/* fs.h — TigFS v6 hierarchical filesystem (TigxOS 1.2.1) */
+/* fs.h — TigFS v6 hierarchical filesystem (TigxOS 1.3.8) */
 #ifndef FS_H
 #define FS_H
 

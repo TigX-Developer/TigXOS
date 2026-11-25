@@ -1,4 +1,4 @@
-/* edit.c — console text editor for TigxOS 1.1.12
+/* edit.c — console text editor for TigxOS 1.3.8
  *
  * Keys:
  *   arrows / Home / End   move cursor

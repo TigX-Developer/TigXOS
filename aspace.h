@@ -1,4 +1,4 @@
-/* aspace.h — per-process address spaces (TigxOS 1.0.76) */
+/* aspace.h — per-process address spaces (TigxOS 1.3.8) */
 
 
 #ifndef ASPACE_H
@@ -41,11 +41,14 @@ struct address_space {
     struct aspace_page pages[ASPACE_MAX_PAGES];
     int       ntables;
     void     *tables[ASPACE_MAX_TABLES];    /* intermediate tables to free */
+    int       refcount;                     /* threads sharing this AS (1.2.11+) */
 };
 
 void aspace_init(void);
 struct address_space *aspace_create(void);
-void aspace_destroy(struct address_space *as);
+void aspace_ref(struct address_space *as);   /* +1 share (thread create) */
+void aspace_unref(struct address_space *as); /* -1; destroy at 0 */
+void aspace_destroy(struct address_space *as); /* force free; prefer unref */
 int aspace_map(struct address_space *as, uintptr_t virt, uintptr_t phys,
                uint64_t flags);
 int aspace_user_range_ok(struct address_space *as, uintptr_t addr, size_t len);
@@ -58,5 +61,12 @@ struct address_space *aspace_kernel(void);
 /* Map USER_STACK_PAGES contiguous frames at USER_STACK_BASE; guard left empty.
  * Returns virtual SP top (USER_STACK_TOP) or 0 on failure. *out_phys = base phys. */
 uintptr_t aspace_map_user_stack(struct address_space *as, void **out_phys);
+
+/* 1.2.11: per-thread user stacks below the main stack, each with a guard page.
+ * slot 0 = main stack (USER_STACK_*). slots 1..USER_THREAD_STACK_SLOTS mapped here.
+ * Returns virtual SP top or 0 on failure. */
+#define USER_THREAD_STACK_SLOTS  4
+#define USER_THREAD_STACK_STRIDE (USER_STACK_SIZE + PAGE_SIZE) /* stack + guard */
+uintptr_t aspace_map_thread_stack(struct address_space *as, int slot);
 
 #endif

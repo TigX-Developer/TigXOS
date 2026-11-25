@@ -1,4 +1,4 @@
-/* filetable.c — shared open-file table with refcounts (TigxOS 1.1.12) */
+/* filetable.c — shared open-file table with refcounts (TigxOS 1.3.8) */
 
 #include "filetable.h"
 #include "pipe.h"

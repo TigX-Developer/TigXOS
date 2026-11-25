@@ -1,4 +1,4 @@
-/* kill.c — send signal / force-exit a process (TigxOS 1.1.9) */
+/* kill.c — send signal / force-exit a process (TigxOS 1.3.8) */
 #include "libc.h"
 
 static int parse_int(const char *s, int *out) {

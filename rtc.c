@@ -1,4 +1,4 @@
-/* rtc.c — read PC CMOS real-time clock (TigxOS 1.1.12) */
+/* rtc.c — read PC CMOS real-time clock (TigxOS 1.3.8) */
 #include "rtc.h"
 #include "io.h"
 #include "console.h"

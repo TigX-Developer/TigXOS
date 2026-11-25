@@ -1,5 +1,635 @@
 # TigxOS changelog
 
+## 1.3.8 — Carry-over audit + DMA allocator
+
+Built on the 1.3.7-update4 baseline (all 333 checks green, SMP 2/4 park-stable).
+
+### Kernel image headroom
+- Kernel default `OPT=-Os` so the image stays under the 511-sector bootloader limit.
+- Override with `make OPT=` if you need unoptimised builds for debugging.
+
+### HPET via ACPI
+- Parse the ACPI **HPET** table for the MMIO base; fall back to `0xFED00000` only when the table is absent.
+- i386 still skips HPET (MMIO outside the identity window).
+
+### DMA-safe allocator
+- New `dma_alloc` / `dma_free` / `dma_alloc_pages` / `dma_free_pages` in `memory.c`.
+- Contiguous physical frames, preferred below 4 GiB for 32-bit bus masters.
+- AC97/HDA CORB/RIRB and PCM buffers allocate through this path.
+
+### USB HID keyboards
+- Typematic **key repeat** (~400 ms delay, ~50 ms rate) in `usb_hid_poll`.
+- Shift map already present; repeat uses the active shift state.
+
+### Green Lizard thread bindings
+- `gl_thread_spawn` / `gl_thread_join` / `gl_thread_exit` / `gl_thread_self` in libc
+  (alongside the existing channel API from 1.3.7).
+
+### Deadlock detector
+- Beyond recursive-mutex refusal: tracks a small per-task lock stack and warns on
+  **lock-order inversion** between pairs of mutexes.
+
+### Honest limits (not claimed done)
+- Full process vs thread struct split remains incremental (scheduler entity is still `struct process` with group metadata).
+- AHCI as root disk on real hardware needs real-HW bring-up (1.3.12).
+- HDA stream DMA for full PCM is still partial; AC97 PCM path plays square-wave tones.
+- Per-core device interrupt routing is prepared by IOAPIC discovery; full MSI routing stays for GPU/Wi-Fi work.
+
+
+## 1.3.7-update4 — AP fully silent + pin tasks to BSP
+
+Invalid Opcode on idle-1 at RIP≈0xf continued after update3 because:
+1. AP still did `sti;hlt` and could take IPIs
+2. `process_pick_cpu()` assigned new tasks to CPU 1 and sent resched IPIs
+
+Fix:
+- AP park is **`cli;hlt` only** (no interrupts)
+- `process_pick_cpu()` always returns **0** (BSP)
+- No resched/TLB IPIs to APs while parked
+- Scheduler will not steal AP-bound tasks
+
+
+## 1.3.7-update3 — AP schedule Invalid Opcode fix
+
+After GDT/IDT load, AP still called `schedule()` while `idle-N` had
+`rsp=NULL`. `context_switch` then resumed garbage → **Invalid Opcode**
+at RIP≈0xf (pid idle-1). Fix: park AP on `sti;hlt` only; allocate a real
+idle stack + `ap_idle_park` frame for a later full multicore scheduler.
+
+
+## 1.3.7-update2 — SMP AP triple-fault fix
+
+AP `ap_main` never loaded the kernel GDT or IDT after the trampoline.
+QEMU showed `IDT=0` → GPF on first interrupt after `sti` → double fault →
+triple fault / CPU Reset. Fix: `cli` → `gdt_load_ap()` → `idt_load()` before
+LAPIC / schedule / `sti`.
+
+
+## 1.3.7-update8 — `make test-smp` really runs the tests
+
+- `make test-smp` / `test-smp4` built a *normal* image (no `-DTIGX_BOOT_TESTS`), so QEMU just
+  booted to the shell and waited until the timeout: the target-specific `TESTS=1` is not seen by
+  the makefile's parse-time checks. They now call `$(MAKE) ARCH=x86_64 TESTS=1 ...-run`.
+- Result of update7 confirmed: with 2 CPUs the machine boots, AP "idle-1" runs, shell starts. The
+  reboot loop is gone.
+- Seen in that log, not fixed: with `-smp 2` the E820 table showed 7 entries (6 real + one
+  zero-length) and "Total RAM detected: 12415 MB" — the total counts garbage/reserved ranges.
+
+## 1.3.7-update7 — AP (second CPU) crash-safety, SMP test diagnostics
+
+- **`make test` x86_64 `-smp 2` reboot loop**: the machine kept resetting right after
+  "2 CPU(s) online". Cause found by reading the code: a started AP stayed on the low-memory
+  trampoline GDT and **never loaded an IDT**, so *any* interrupt or exception on that CPU was a
+  triple fault, and QEMU resets the whole VM on that. (`make test` only began running `-smp 2/4`
+  in 1.3.6, so this had never been exercised.)
+- `ap_main` now first calls new `gdt_load_ap()` (kernel GDT, no TSS) and `idt_load()` (the BSP's
+  IDT, now actually defined in interrupt.c). A fault on an AP now shows the panic screen
+  instead of silently rebooting.
+- **Still not done:** per-CPU TSS (APs are ring-0 only) and proof that user processes can run on
+  an AP. If the SMP suite still fails, the new panic screen or the debug log will say where.
+- `test-smp` / `test-smp4`: run QEMU with `-no-reboot -d cpu_reset,guest_errors -D smp2-debug.log`
+  (`smp4-debug.log`). A crash now stops QEMU (no more 10,000-line reboot loops) and the log holds
+  the CPU registers at the moment of the fault.
+- Size: with `TESTS=1` the x86_64 kernel is 259,188 of 261,632 bytes (99%). Build with `OPT=-Os`.
+
+## 1.3.7-update5 — test timeout + kernel `OPT=` switch
+
+- **i386 `make test` TIMEOUT** (stopped after the ramfs "open /tmp file" check): `vfs.c`/`ramfs.c` are
+  byte-identical to 1.3.3, so this is not a ramfs bug. The 45 s limit was already near the edge
+  (it was 35 s before) and every version adds boot work. Limits raised to 120 s. If it still stops at
+  the same line with 120 s it is a real hang: run the debug command in the notes.
+- New **`OPT=`** make variable: extra flags for the kernel only (default none, nothing changes).
+  `make OPT=-Os ...` builds the x86_64 kernel at 177,684 bytes instead of 257,492 (-31%).
+  A different `OPT` triggers a clean rebuild (stamp now includes it).
+- Known cosmetic bugs (not fixed here): the boot log prints `%zu` / `%.6s` literally and the
+  memory map lines show garbage (printf lacks `%zu`, `%.Ns`, and 64-bit args are misread).
+
+## 1.3.7-update4 — build fixes (this one compiles)
+
+- **`xhci.c`**: two `pr_warn`/`pr_info` format strings had a real line break inside the quotes
+  (the `\n` had been turned into an actual newline), so the file did not compile on x86_64 or
+  i386 (`make test` failed at xhci.o). Joined back into `"...\n"`.
+- **`usb.c`**: `usb_msc_register_blocks` was used before it was declared (implicit declaration,
+  conflicting type) -> prototype added to `usb.h`; removed the unused duplicate
+  `hid_mouse_poll_one` (mouse polling is already inside `usb_hid_poll`); silenced an unused
+  parameter warning.
+
+## 1.3.7-update1 — xHCI bulk + HDA verbs + process.h fix
+
+### Build fix
+- **`process.h`**: `struct proc_group` was inserted before `MAX_FDS` / `struct process` → compile error. Correct order restored.
+
+
+### USB MSC (honest gap closed)
+- **`xhci_config_bulk_eps`**: Configure Endpoint with bulk OUT/IN transfer rings
+- **`xhci_bulk`**: Normal TRB + doorbell + transfer event wait
+- Config descriptor **endpoint parse** → DCI map
+- MSC devices **register as block** (`usb0`) when bulk configure succeeds
+- BOT CBW/CSW path uses real DCI numbers
+
+### HDA
+- Map BAR0, GCTL reset, **CORB/RIRB** run
+- Codec verbs: AFG power D0, amp unmute on nodes 0x02–0x0A
+- PCM stream DMA still speaker-backed on HDA; AC97 PCM unchanged
+
+### AHCI
+- Unchanged path: PCI → AHCI → default block when port online
+- QEMU without `-device ahci` keeps ATA (expected)
+
+
+## 1.3.7 — Process groups, MSC BOT, AHCI boot path, PCM, ps/top threads
+
+### True process vs thread allocations
+- `struct proc_group` table: owns AS, cwd, heap, refcount
+- Leader `process_group_bind_leader`; secondary `process_group_bind_thread`
+- Threads still schedule via `process_table` (thread slots); group is separately allocated
+
+### Deadlock detector
+- Mutex recursive-acquire detection (`dl_holds` / warn)
+
+### GL thread/channel
+- `gl_channel_create/send/recv` in user libc; `examples/threads.gl` stub
+
+### ps / top
+- Columns: TID, PID/TGID, TYPE (thr|proc|kern)
+
+### USB MSC
+- BOT CBW/CSW + READ(10)/WRITE(10) shape; needs `xhci_bulk` Configure Endpoint (returns -1 until bulk rings exist)
+
+### AC97 PCM DMA
+- BDL + PO DMA kick in `audio_play_tone`; speaker fallback
+
+### Boot from AHCI
+- `pci_init` → `ahci_init` → `block_init`; AHCI registers `ahci0` and `block_set_default`
+- `fs` `read_lba` prefers `block_read_default` then ATA
+
+### Honest limits
+- xHCI bulk EP configure still incomplete → USB stick I/O soft-fails
+- QEMU without AHCI controller keeps ATA path
+- HDA codec verbs not implemented (speaker/AC97 PCM only)
+
+
+## 1.3.6 — Close deferred gaps (honest status)
+
+### Implemented
+| Gap | What landed |
+|-----|-------------|
+| **1.2.3 process/thread** | Documented model; `tid` field; leaders set `tid=tgid=pid`. Full two-struct allocation still next |
+| **1.2.8 I/O APIC** | `ioapic.c`: map MADT IOAPIC, program IRQ0–15 → vectors 32–47, mask 8259 PIC (x86_64) |
+| **1.2.9 make test SMP** | `make test` runs `test-smp` (-smp 2) and `test-smp4` (-smp 4) on x86_64 |
+| **1.2.12 locks** | Kernel `rwlock_*`; userland `malloc`/`free` under `mutex_t` |
+| **1.3.3 AHCI** | HBA detect, port start, DMA READ/WRITE DMA EXT helpers; ATA still default boot disk |
+| **1.3.4/5 USB mouse** | Boot-protocol mouse via `usb_hid_poll` → `mouse_inject` |
+| **1.3.4/5 USB MSC** | Devices still counted; `usb_msc_read/write` API returns -1 until bulk EPs done |
+| **1.3.5 audio** | AC97 mixer unmute when NAMBAR present; **`audio_beep`** via PC speaker |
+
+### Still incomplete (honest)
+- Physical process vs thread *allocations* (single `struct process` remains the sched entity)
+- Deadlock detector, Green Lizard thread/channel bindings, ps/top full thread columns
+- USB MSC bulk BOT data path
+- HDA/AC97 PCM DMA playback (beep is PC speaker)
+- AHCI as root disk (boot path still ATA PIO)
+
+
+## 1.3.5-update2 — USB HID wired, KERNEL_SECTS=511
+
+### Bugs fixed
+1. **USB keyboard never delivered keys** — `usb_hid_poll()` was never called. Timer IRQ calls it every other tick (~50 Hz). Edge-triggered (no held-key spam) + Shift map.
+2. **KERNEL_SECTS** capped at **511** (TigFS at LBA 512; max kernel 261632 bytes, matches mkosimage.py).
+3. **HPET** — i386 still skipped; x86_64 uses 0xFED00000 (ACPI HPET table parse deferred).
+
+
+## 1.3.5-update1 — HPET i386 page-fault fix
+
+- **Bug:** `hpet_init` always read `0xFED00000`. On i386 that address is outside the identity map → page fault during boot tests.
+- **Fix:** Skip HPET probe on i386 (same policy as LAPIC). On x86_64, `vmm_map_mmio` then CAP/CONFIG; remove unused `cfg` warning.
+
+
+## 1.3.5 — USB control/HID/MSC + HPET + audio detect
+
+### USB (completes 1.3.4 path)
+- **Control transfers** on xHCI (Setup/Data/Status TRBs)
+- **Enable Slot** + **Address Device** with input contexts
+- **GET_DESCRIPTOR** (device + config) → class/VID/PID
+- **HID boot keyboard**: SET_CONFIGURATION / SET_PROTOCOL / SET_IDLE; `usb_hid_poll` + `keyboard_inject_char`
+- **MSC**: devices counted after classify (BOT data path next)
+
+### HPET
+- Probe **0xFED00000**, enable main counter, `hpet_read_counter` / `hpet_udelay`
+
+### Audio
+- PCI scan for **AC97** (04:01) and **HDA** (04:03); log backend name (PCM DMA later)
+
+### Build
+- `KERNEL_SECTS=640`, objects: `hpet.o` `audio.o`
+
+### QEMU tips
+```text
+-device qemu-xhci -device usb-kbd
+-device AC97   # or intel-hda
+```
+
+
+## 1.3.4-update1 — xhci BAR mapping safety, kernel sector limit
+
+- `xhci.c` `map_bar`: if the BAR cannot be mapped the controller is now **skipped** instead of
+  being used anyway. Before, a failed map was only a warning, and the next register read would
+  page-fault and panic the kernel. On i386 (identity map 0-1 GB only) any BAR above 1 GB is
+  skipped; QEMU/VirtualBox put xHCI BARs near 0xFEB00000, so i386 with a USB controller would
+  have crashed at boot.
+- `KERNEL_SECTS` 576 -> 511: LBA 512 is the TigFS superblock, so 511 is the true maximum and the
+  size check in `make` now matches what `mkosimage.py` enforces.
+
+## 1.3.4 — USB xHCI foundation
+
+### Features
+- **xHCI host controller driver** (`xhci.c`): PCI discover (class 0C/03/30), BAR0 MMIO, HCRST, DCBAA + command/event rings, Run bit
+- **Root-port scan**: CCS / speed / port reset; devices recorded in the USB table
+- **USB glue** (`usb.c` / `usb.h`): controller/device queries, `usb_dump`, HID/MSC hooks (stubs until control transfers)
+- **Boot**: `USB...` after PCI; messages in `dmesg`
+- **Tests**: `test_suite_usb` (safe without a controller)
+
+### How to exercise
+```text
+make test                          # no xHCI required
+make && qemu-system-x86_64 -m 128 -device qemu-xhci \
+  -drive file=os-image.bin,format=raw,if=ide,index=0,media=disk
+# dmesg / boot log: xhci: ... controller running
+```
+
+### Honest limits
+- Control transfers / Address Device / HID interrupt / MSC BOT not done yet — PS/2 keyboard & mouse stay primary
+- Storage still ATA block layer; USB MSC registers 0 devices until BOT lands
+- i386 builds the same code; MMIO mapping is best-effort in the identity window
+
+
+## 1.3.3-update2 — kernel static memory moved out of the video-memory hole
+
+### Why
+After the block layer arrived, the kernel's zero-initialised data (`.bss`, ~396 KB) ran from
+0x48240 up to 0xA8FE0. That crosses 0x9FC00 (BIOS data area) and **0xA0000 (VGA video memory)**.
+Variables placed there (`lapic_regs`, `ap_stacks`, SMP counters, ...) were not in real RAM, so
+reads could return something other than what was written (VGA decodes that window itself).
+It happened to work before only because `.bss` ended below the line.
+
+### Fix
+- `linker.ld` and `arch/i386/linker.ld`: `.bss` now starts at 1 MB (0x100000).
+  Frames below 8 MB are already reserved (`RESERVED_END` in memory.c), so the page allocator
+  never hands them out. `kernel.bin` size is unchanged (bss is not stored in the image).
+
+### Notes
+- Real maximum kernel image is 511 sectors (LBA 512 is the TigFS superblock); `mkosimage.py`
+  already enforces this, so `KERNEL_SECTS=512` only matters for the loader's read count.
+- Not yet done: explicit zeroing of `.bss` at boot (relies on RAM being zero, true in QEMU).
+
+## 1.3.3-update1 — kernel size + partition parser warnings
+
+### Build
+- **`KERNEL_SECTS` 448 → 512** (256 KiB). x86_64 `kernel.bin` had grown past 229376 bytes (block/part/mount/HAL stack), so the image check failed with `exceeds bootloader KERNEL_SECTS`.
+
+### Warnings
+- **`part.c` MBR name path**: removed empty `if (d) ;` body (`-Wempty-body`)
+- **`part.c` GPT names**: copy `name_utf16` out of the packed entry before `utf16_to_ascii` (`-Waddress-of-packed-member`)
+
+
+## 1.3.3 — Block layer, partitions (MBR/GPT), mount table
+
+### Features
+- **Block layer** (`block.h` / `block.c`): device registry, ATA backend wrapper,
+  32-slot sector cache, `blk_read` / `blk_write`.
+- **Partitions** (`part.h` / `part.c`): MBR (4 primary) and GPT parsing, whole-disk
+  fallback when no table is present (TigFS image layout).
+- **Mount table** (`mount.h` / `mount.c`): multiple mounts, longest-prefix lookup.
+  Boot seeds `/` → TigFS and `/tmp` → ramfs.
+- Existing ATA PIO driver remains the storage backend. AHCI is deferred to a
+  later driver pass (PCI class is already visible via 1.3.0).
+- Version **1.3.3**.
+
+### Notes
+- TigFS still talks to `disk_read`/`disk_write` directly; the block layer is the
+  path new filesystems (FAT32/NTFS) and partition-relative I/O will use.
+- Protective MBR + GPT is detected; MBR type 0xEE does not create fake MBR
+  partitions.
+- No format/partition editor yet — that comes with the installer (1.10.x).
+
+### Files added
+- `block.h`, `block.c`, `part.h`, `part.c`, `mount.h`, `mount.c`
+
+---
+
+## 1.3.2 — PS/2 mouse
+
+### Features
+- **`mouse.h` / `mouse.c`**: standard PS/2 mouse over the 8042 auxiliary port.
+  - Reset, stream mode, enable reporting.
+  - IRQ12 handler, 3-byte packets, button mask, clamped X/Y position.
+  - `mouse_get_state()`, `mouse_poll()`, `mouse_set_bounds()`.
+  - Bounds follow the active framebuffer when present, else 1024×768 virtual.
+- Wired after `fb_init` in `kernel.c`. Version **1.3.2**.
+
+### Notes
+- Shares ports 0x60/0x64 with the keyboard; mouse commands use the 0xD4 prefix.
+- IRQ2 (cascade) is enabled so IRQ12 can fire.
+- No GUI cursor yet — that arrives with the compositor (1.4 / 1.5). This layer
+  only delivers coordinates and buttons for later use.
+- QEMU: use `-device usb-tablet` or the default PS/2 mouse; absolute tablet is
+  not required for this driver.
+
+### Files added
+- `mouse.h`, `mouse.c`
+
+---
+
+## 1.3.1 — Linear framebuffer (VBE / BGA)
+
+### Features
+- **`fb.h` / `fb.c`**: linear framebuffer abstraction.
+  - Boot VBE handoff at `0x9800` (`ARCH_BOOT_FB_INFO`, magic `TIGF`) when
+    boot.asm has already set a mode (real hardware path).
+  - **Bochs/QEMU VBE DISPI (BGA)** is probed at boot but **not enabled**, so the
+    VGA text console stays visible. Call `fb_enable_bga(w,h,bpp)` when you want
+    graphics (compositor / tests). Maps the high LFB with `vmm_map_mmio`.
+  - Drawing: `fb_clear`, `fb_put_pixel`, `fb_fill_rect`, `fb_hline`, `fb_vline`.
+  - Graceful no-op when inactive (i386 / no BGA stays text mode).
+- Wired after PCI in `kernel.c`. Version **1.3.1**.
+
+### Notes
+- **Important:** enabling BGA switches the display out of text mode. That is
+  why auto-enable was removed — otherwise the shell and `make test` output
+  disappear and the screen looks black.
+- GUI renderer (1.4.0+) will call `fb_enable_bga` when it starts.
+- i386: BGA LFB is above 1 GB → enable fails, text mode remains (roadmap: GUI
+  is x86_64-only).
+
+### Files added
+- `fb.h`, `fb.c`
+- `ARCH_BOOT_FB_INFO` in `arch/arch.h`
+
+---
+
+
+## 1.3.0 — HAL + PCI enumeration (MSI / MSI-X)
+
+### Features
+- **HAL** (`hal.h` / `hal.c`): machine identity (arch, vendor/brand, CPU count,
+  APIC/MSI presence), thin device registry, MSI vector allocation that uses the
+  existing LAPIC from 1.2.8.
+- **PCI** (`pci.h` / `pci.c`): full config-space access (0xCF8/0xCFC), bus 0–7
+  scan, multi-function devices, Type-0 BAR decode (I/O + 32/64-bit memory),
+  capability walk (MSI, MSI-X, PCIe), `pci_enable_device`, single-message MSI
+  and first MSI-X table entry helpers.
+- Wired into `kernel.c` after SMP bring-up; objects added to `KERNEL_OBJS`.
+- Version bumped to **1.3.0** (`version.h` is source of truth).
+
+### Notes
+- Thin-kernel rule kept: no driver policy inside the HAL.
+- i386 still builds and boots; PCI scan works, MSI is gated on APIC presence.
+- Ready for 1.3.1 (linear framebuffer) and 1.3.3 (AHCI) which need this layer.
+- Debug: `pci_dump_all()`, `hal_dump_machine()`, `hal_dump_devices()`.
+
+### Files added
+- `hal.h`, `hal.c`, `pci.h`, `pci.c`
+
+---
+
+
+## 1.2.12-update3 — i386 regression crash: stale wait-queue registry entries
+
+### What broke
+Same panic after update2: `Invalid Opcode`, `pid=3 name="reg_b"`, `EIP=0x00000003`, with
+**identical register values** in both runs. Identical values mean it was not a timing
+race, so the update2 "half-built process" theory was not the cause. (The irq-off change
+in `process_create*` stays as harmless hardening.)
+
+### Why
+`wait_queue_init` keeps every queue's address in a global registry so a dying process
+can be removed from every queue (`wait_queue_remove_pid`). Many queues live on **stacks or
+heap blocks that are freed and reused** (kernel mutexes/semaphores created inside test
+functions, etc.). Their registry entries were never removed.
+
+Update1 grew the registry from 32 to 128 slots (to stop the futex "registry full" spam). With
+the old size the registry filled up early, so later dangling queues were simply refused. At 128
+they were all accepted. When `reg_a` exited, `wait_queue_remove_pid` walked those dangling
+pointers, read garbage as `count`/`waiters`, found "pid" matches and `remove_at()` **shifted
+words and wrote -1 into memory that now belonged to something else**, here the freshly
+allocated kernel stack of `reg_b`. The first word `reg_b` returns into (its entry address) was
+overwritten, so it "returned" to address 3 (its pid) on its first instruction.
+
+### Fix
+- `struct wait_queue` has a `magic` field set by `wait_queue_init`.
+- `wait_queue_remove_pid` only touches a registered queue that still has the magic and a sane
+  `count` (0..WAIT_QUEUE_MAX). Stale entries are skipped, never written to.
+- When the registry is full it first **compacts** (drops stale entries), so long-lived systems
+  do not leak slots.
+
+### Notes
+- In-OS version stays **1.2.12**.
+- Proper follow-up (1.2.13): add `wait_queue_destroy()` and call it from `mutex_destroy` / `sem_destroy`,
+  or track the queue a process is blocked on in `struct process` so there is no global registry.
+
+## 1.2.12-update2 — i386 regression-suite crash (half-built process scheduled)
+
+### What broke
+After update1, `make test` on i386 passed every suite up to `regression`, then
+panicked: `Invalid Opcode`, `pid=3 name="reg_b"`, `EIP=0x00000003`.
+
+### Why
+`process_create` (and the user/thread variants) marked the new process
+`PROC_READY` **before** its kernel stack was allocated and its first stack frame was
+built. Allocating and zeroing a 16 KB stack takes a while, and process_create ran with
+interrupts on. If the timer tick landed in that window, the scheduler picked the
+half-built process and switched to a stack with no valid frame, so it "returned" to a
+garbage address (EIP=3). It is a timing race: it only fails when the tick lands in
+that window, which is why earlier runs happened to pass and any layout/timing change
+could expose it.
+
+### Fix
+- `process_create`, `process_create_user`, `process_create_user_at` and
+  `process_thread_create` now run with interrupts off (`irq_save` / `irq_restore` on
+  every return path) from slot selection until the process is fully built.
+
+### Notes
+- In-OS version stays **1.2.12**.
+- Still open for 1.2.13+/SMP: on several CPUs the slot pick needs a real lock (another
+  CPU could still see a half-built slot); mark the process READY as the **last** step.
+
+## 1.2.12-update1 — x86_64 test crash (boot stack overlapped the log buffer)
+
+### What broke
+`make test` on x86_64 stopped in the `syscall` suite with a kernel fault whose
+registers were full of ASCII text (`RBX=0x73657274` is "tres"), then `System halted`
+and `RESULT ARCH=x86_64 TIMEOUT`. i386 passed.
+
+### Why
+The boot/idle stack was hard-coded at **0x90000** (`mov rsp, 0x90000`). The kernel's
+own `.bss` (zero-filled data: tables, buffers) grew in 1.2.12 (futex keys) and the
+dmesg `log_buf` moved to 0x8c1a0–0x901a0, so it sat **on top of the stack**. Once
+the log wrapped, log text overwrote the saved registers/return addresses of the
+idle task, and the next context switch jumped into text.
+
+### Fix
+1. **The boot stack is now a reserved `.bss` object** (`boot_stack_top`, 16 KB) in
+   both `arch/*/entry.asm`. `process.c` (idle task, TSS fallback) and `gdt.c`
+   (initial `tss.esp0/rsp0`) use it instead of the magic 0x90000. It can no longer
+   be overlapped by anything the linker places.
+2. **Wait-queue registry 32 → 128.** `futex_init` creates 64 queues, which flooded the
+   boot log with `wait: registry full (32), 'futex' not tracked` and left futex
+   waiters out of exit cleanup (a killed process could stay on a futex queue).
+3. **`process_load_tls`** now ignores kernel tasks and non-canonical addresses
+   (WRMSR on a non-canonical FS base raises #GP in ring 0). Defense only; it was
+   not the root cause.
+4. **`KERNEL_SECTS` 416 → 448.** The kernel was at 95% of the loader limit
+   (203,008 of 212,992 bytes).
+
+### Notes
+- In-OS version stays **1.2.12**.
+- Lesson: never hard-code a stack address inside memory the kernel image can grow into.
+
+## 1.2.12 — Thread synchronization + libc
+
+### Features
+- **`SYS_FUTEX` (34)** — `FUTEX_WAIT` / `FUTEX_WAKE` on user-aligned ints, hashed wait queues
+- **User libc**: `thread_create` / `thread_join` / `thread_exit` / `gettid` / `futex`
+- **`mutex_t`**: userspace mutex via CAS + futex
+- **`cond_t`**: condition variable (wait / signal / broadcast)
+- **`errno`** symbol for libc (process-scoped for now; TLS-backed later)
+- Kernel **mutex/semaphore** unchanged and still covered by tests
+
+### Tests
+- New **`futex`** suite: ABI numbers, rejection of kernel/misaligned addresses
+- `SYS_MAX` updated to 34
+
+### Notes
+- Futex timeout is infinite in this release (3-arg syscall); timeout arg can land later
+- i386 builds and boots; parallel threads remain an x86_64 focus per roadmap
+- Next after 1.2.x freeze: **1.3.0 HAL + PCI**
+
+## 1.2.11-update4 — user-thread correctness
+
+### Fixes
+1. **`exit_thread_only` is per-task**, not a global. `process_thread_exit` set a
+   global flag then called `process_exit` (which never returns), so the clear
+   never ran and every later `process_exit` skipped group kill.
+2. **Address-space refcount** (`aspace_ref` / `aspace_unref`). Threads share the
+   leader’s AS; the last exit destroys it. A lone `SYS_THREAD_EXIT` of the leader
+   no longer frees memory under remaining threads.
+3. **User-pointer checks** on `SYS_CLONE` (entry/stack in user window) and
+   `SYS_THREAD_JOIN` (`status*` must be writable user memory).
+4. **`sched_lock`** around thread create, join generation capture, and group kill.
+5. **`thr_gen` generation** on each thread create so join cannot attach to a
+   reused process-table slot.
+
+### Tests
+- `uthread` suite checks `exit_thread_only` and AS ref helpers.
+
+## 1.2.11-update3 — sched test hang
+
+### Fix
+- **sched fairness**: do **not** lower the test-runner below worker priority.
+  That starved `timer_sleep_ms` forever under strict priority and caused
+  `RESULT ARCH=i386 TIMEOUT` after "spawned two equal-prio workers".
+- Prove concurrency with **spin counters** (hard check); keep `ticks_ran` soft.
+- `make test-qemu` timeout 35s → 45s.
+
+## 1.2.11-update2 — sched fairness test (x86_64)
+
+### Fix
+- **sched suite**: equal-prio workers now do short busy work (not pure yield),
+  the test-runner drops to `PRIO_MIN` while they run, and "both workers
+  accrued ticks" is a **soft** check. Under host load a pure-yield loop could
+  miss timer samples and hard-fail `make test` on x86_64.
+
+## 1.2.11-update1 — kthread create race (i386)
+
+### Fix
+- **`kthread_create`**: install `kthread_fn` / `is_kthread` under `irq_save` so a
+  timer tick cannot run the trampoline before the entry pointer is set.
+  Without this, i386 `make test` saw `kthread alive` / `join status 42` / `body
+  ran` fail (trampoline exited with 0).
+- Silence unused `ap_main` on i386 (`-Wunused-function`).
+
+### Notes
+- In-OS version remains **1.2.11**. Tarball: `TigxOS-v1.2.11-update1.tar.gz`.
+
+> **Versioning:** in-OS string is the release (`1.2.11`). Tarball `-updateN` is for pure
+> bugfixes; Git tags are `v1.2.11`.
+
+## 1.2.11 — User threads
+
+### Features
+- **`process_thread_create(entry, stack)`** — new user thread in the same address
+  space (shared `as` + open-file refs). `stack == 0` maps a **guarded** per-thread
+  user stack below the main stack.
+- **`process_thread_exit` / `process_thread_join` / `process_group_kill`**
+- **`process_exit` kills the whole thread group** (POSIX-style); `thread_exit` is
+  single-thread only.
+- **TLS:** `tls_base` per thread; `process_load_tls` on context switch (FS base via
+  `WRMSR` on x86_64).
+- **Syscalls (ABI v1, appended):** `SYS_CLONE` (29), `SYS_THREAD_EXIT` (30),
+  `SYS_THREAD_JOIN` (31), `SYS_SET_TLS` (32), `SYS_GETTID` (33)
+
+### Tests
+- New **`uthread`** suite: ABI numbers, clone refusal in kernel context, TLS store,
+  group_kill / join error paths
+
+### Notes
+- Secondary threads do **not** destroy the shared address space on finalize
+- Full ring-3 clone stress is available via `SYS_CLONE` from user programs
+- Next: **1.2.12** thread sync + thread-safe libc
+
+> **Versioning:** in-OS string is always the release (`1.2.10`). Tarball names
+> may use `-updateN` for pure bugfix packages; Git tags are `v1.2.10`.
+
+## 1.2.10 — Kernel threads
+
+### Features
+- **`kthread_create(name, entry, arg)`** — kernel thread with own stack, shared
+  kernel address space, joinable by default
+- **`kthread_join` / `kthread_detach` / `kthread_exit` / `kthread_alive`**
+- Trampoline delivers `void *arg` to `entry(void *)`
+- Joinable DEAD kthreads are **not auto-reaped** until join/detach (no lost status)
+- Exit wakes a registered joiner
+
+### Tests
+- New **`kthread`** suite: create/join status, arg passing, detach, 4-way concurrent
+  join, error paths
+
+### Notes
+- Built on the existing scheduler (`process_table` slots with `is_kthread`)
+- User threads (`clone`) arrive in **1.2.11**
+
+> **Versioning:** the in-OS string (`version.h` / banner / `TIGX_VERSION`) is
+> always **1.2.9** for this series. Bugfix/tarball names use
+> `TigxOS-v1.2.9-updateN.tar.gz`; Git tags are `v1.2.9`.
+
+## 1.2.9 (update4 tarball) — true multicore scheduling + load balance + IPI ack
+
+### Scheduling
+- **Per-CPU idle fallback** in `pick_next` — APs no longer share `process_table[0]`
+- **`sched_lock`** held across pick_next / state transition (released before context_switch)
+- **Load-balance on create**: new tasks get `process_pick_cpu()` (least-loaded) and
+  remote CPUs receive **resched IPI**
+- **Affinity API**: `process_set_affinity` / `process_get_affinity` / `process_pick_cpu`
+- Steal prefers the **busiest remote CPU** (rq depth); never steals idle
+
+### IPI
+- Resched IPI tracks **ACK generation** with bounded wait (no hang if AP offline)
+- TLB shootdown ACK path retained
+
+### LAPIC
+- `lapic_ap_init` enables the local APIC on application processors
+- Timer helpers present (vector wiring optional)
+
+### Tests
+- Multicore workers with affinity + progress counters
+- Soft check for work on ≥2 CPUs when `-smp 2`
+- IPI resched/TLB stress loops
+- `make test-smp` runs `TESTS=1` with `-smp 2` and isa-debug-exit
+
+### Notes
+- i386 remains UP
+- `make test` still uses `-smp 1` for deterministic CI; use `make test-smp` for APs
+
 ## 1.2.9-update3 — complete SMP completion path
 
 Honest close-out of the 1.2.9 roadmap item:

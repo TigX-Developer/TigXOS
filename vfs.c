@@ -1,4 +1,4 @@
-/* vfs.c — thin VFS over TigFS + ramfs at /tmp (TigxOS 1.2.1) */
+/* vfs.c — thin VFS over TigFS + ramfs at /tmp (TigxOS 1.3.8) */
 
 #include "vfs.h"
 #include "ramfs.h"

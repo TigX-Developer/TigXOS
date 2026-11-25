@@ -1,4 +1,4 @@
-/* aspace.c — Address Spaces (TigxOS 1.2.0)
+/* aspace.c — Address Spaces (TigxOS 1.3.8)
  * Full teardown of intermediate tables, mapped user stacks with guard page,
  * permission flags (RO text, NX data on x86_64).
  */
@@ -62,6 +62,7 @@ struct address_space *aspace_create(void) {
     memset(as, 0, sizeof(*as));
     as->root = frame;
     as->cr3 = (uintptr_t)frame;
+    as->refcount = 1;
     return as;
 }
 
@@ -141,6 +142,7 @@ struct address_space *aspace_create(void) {
     memset(as, 0, sizeof(*as));
     as->root = frame;
     as->cr3 = (uintptr_t)frame;
+    as->refcount = 1;
     return as;
 }
 
@@ -318,4 +320,45 @@ uintptr_t aspace_map_user_stack(struct address_space *as, void **out_phys) {
     if (out_phys)
         *out_phys = base;
     return USER_STACK_TOP;
+}
+
+
+uintptr_t aspace_map_thread_stack(struct address_space *as, int slot) {
+    if (!as || slot < 1 || slot > USER_THREAD_STACK_SLOTS)
+        return 0;
+    /* Place stacks downward from the main stack guard page. */
+    uintptr_t top = USER_STACK_GUARD - (uintptr_t)(slot - 1) * USER_THREAD_STACK_STRIDE;
+    uintptr_t base = top - USER_STACK_SIZE;
+    /* Guard page at base - PAGE_SIZE is intentionally unmapped. */
+    void *frames = pmm_alloc_frames(USER_STACK_PAGES);
+    if (!frames)
+        return 0;
+    memset(frames, 0, USER_STACK_SIZE);
+    for (int i = 0; i < USER_STACK_PAGES; i++) {
+        uintptr_t virt = base + (uintptr_t)i * PAGE_SIZE;
+        uintptr_t phys = (uintptr_t)frames + (uintptr_t)i * PAGE_SIZE;
+        uint64_t fl = PAGE_WRITE | PAGE_NX;
+        if (aspace_map(as, virt, phys, fl) != 0) {
+            for (int j = i; j < USER_STACK_PAGES; j++)
+                pmm_free_frame((void *)((uintptr_t)frames + (uintptr_t)j * PAGE_SIZE));
+            return 0;
+        }
+    }
+    return top;
+}
+
+
+void aspace_ref(struct address_space *as) {
+    if (!as || as == aspace_kernel())
+        return;
+    as->refcount++;
+}
+
+void aspace_unref(struct address_space *as) {
+    if (!as || as == aspace_kernel())
+        return;
+    if (as->refcount > 0)
+        as->refcount--;
+    if (as->refcount <= 0)
+        aspace_destroy(as);
 }

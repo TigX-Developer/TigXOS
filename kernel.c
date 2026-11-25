@@ -1,4 +1,4 @@
-// kernel.c - TigxOS 1.2.8
+// kernel.c - TigxOS 1.3.8
 // Expanded test framework + semantic color palette
 
 
@@ -30,6 +30,19 @@
 #include "acpi.h"
 #include "lapic.h"
 #include "smp.h"
+#include "hal.h"
+#include "pci.h"
+#include "usb.h"
+#include "ahci.h"
+#include "ioapic.h"
+#include "hpet.h"
+#include "audio.h"
+#include "fb.h"
+#include "mouse.h"
+#include "block.h"
+#include "part.h"
+#include "mount.h"
+#include "futex.h"
 #include <stdint.h>
 
 /* ---------- Test registry ---------- */
@@ -63,6 +76,11 @@ static const struct test_entry test_table[] = {
     { 'm', "ramfs",      test_suite_ramfs      },
     { 'A', "atomic",     test_suite_atomic     },
     { 'M', "smp",        test_suite_smp        },
+    { 'K', "kthread",    test_suite_kthread    },
+    { 'U', "uthread",    test_suite_uthread    },
+    { 'F', "futex",      test_suite_futex      },
+    { 'b', "usb",        test_suite_usb        },
+    { 'H', "hpet-audio", test_suite_hpet_audio },
     { '0', "regression", test_suite_regression },
 };
 #define TEST_TABLE_N (sizeof(test_table)/sizeof(test_table[0]))
@@ -195,22 +213,56 @@ void kmain(void) {
     keyboard_init();
     kprintf_color(TIG_HEADER, "Disk...\n");
     disk_init();
+
+    kprintf_color(TIG_HEADER, "PCI...\n");
+    pci_init();
+    kprintf_color(TIG_HEADER, "AHCI...\n");
+    ahci_init();
+
+    kprintf_color(TIG_HEADER, "Block...\n");
+    block_init();
+    kprintf_color(TIG_HEADER, "Partitions...\n");
+    part_init();
     kprintf_color(TIG_HEADER, "FS...\n");
     fs_init();
     vfs_init();
+
+    kprintf_color(TIG_HEADER, "Mounts...\n");
+    mount_init();
     kprintf_color(TIG_WARN, "\nProcesses (preemptive, blocking)...\n");
     /* filetable BEFORE process_init — idle's stdio allocates console_of */
     filetable_init();
     pipe_init();
     process_init();
+    futex_init();
 
     /* SMP foundation (1.2.8): LAPIC + AP bring-up. After process_init so
        smp_mark_online can update cpu_data[]. Only BSP schedules until 1.2.9. */
     kprintf_color(TIG_HEADER, "LAPIC...\n");
     lapic_init();
+    kprintf_color(TIG_HEADER, "IOAPIC...\n");
+    ioapic_init();
     kprintf_color(TIG_HEADER, "SMP...\n");
     smp_init();
     smp_ipi_init();
+
+    kprintf_color(TIG_HEADER, "HAL...\n");
+    hal_early_init();
+    hal_late_init();
+    kprintf_color(TIG_HEADER, "USB...\n");
+    usb_init();
+
+    kprintf_color(TIG_HEADER, "HPET...\n");
+    hpet_init();
+
+    kprintf_color(TIG_HEADER, "Audio...\n");
+    audio_init();
+
+    kprintf_color(TIG_HEADER, "Framebuffer...\n");
+    fb_init();
+
+    kprintf_color(TIG_HEADER, "Mouse...\n");
+    mouse_init();
 
     seed_shell_from_embed();
 

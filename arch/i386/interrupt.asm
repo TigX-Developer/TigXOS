@@ -1,4 +1,4 @@
-; arch/i386/interrupt.asm — 32-bit ISR + IRQ stubs (TigxOS 1.2.0)
+; arch/i386/interrupt.asm — 32-bit ISR + IRQ stubs (TigxOS 1.3.8)
 ; pusha + segment pushes give a fixed frame; we align ESP to 16 before the
 ; C call so the SysV i386 ABI (and any SSE spill) is satisfied.
 [bits 32]

@@ -1,4 +1,4 @@
-/* fs.c — TigFS v6 hierarchical (directories + path walk) for TigxOS 1.2.1
+/* fs.c — TigFS v6 hierarchical (directories + path walk) for TigxOS 1.3.8
  *
  * On-disk layout (unchanged geometry from v5/v6 flat):
  *   LBA 512      superblock
@@ -13,6 +13,7 @@
 #include "version.h"
 #include "fs.h"
 #include "disk.h"
+#include "block.h"
 #include "console.h"
 #include "string.h"
 #include "spinlock.h"
@@ -58,8 +59,14 @@ static int fs_ok = 0;
 static uint8_t sector[512] __attribute__((aligned(2)));
 static spinlock_t fs_lock = SPINLOCK_INIT;
 
-static int read_lba(uint32_t lba, void *buf) { return disk_read(lba, 1, buf); }
-static int write_lba(uint32_t lba, const void *buf) { return disk_write(lba, 1, buf); }
+static int read_lba(uint32_t lba, void *buf) {
+    if (block_read_default(lba, 1, buf) == 0) return 0;
+    return disk_read(lba, 1, buf);
+}
+static int write_lba(uint32_t lba, const void *buf) {
+    if (block_write_default(lba, 1, buf) == 0) return 0;
+    return disk_write(lba, 1, buf);
+}
 
 static int bittest(uint32_t i) { return (bitmap[i / 8] >> (i % 8)) & 1; }
 static void bitset(uint32_t i) { bitmap[i / 8] |= (uint8_t)(1u << (i % 8)); }

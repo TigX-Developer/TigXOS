@@ -1,4 +1,4 @@
-/* shell.c — interactive shell for TigxOS 1.1.12 */
+/* shell.c — interactive shell for TigxOS 1.3.8 */
 
 #include "libc.h"
 #include "version.h"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-mktigfs.py — build a hierarchical TigFS v6 image for TigxOS 1.2.1.
+mktigfs.py — build a hierarchical TigFS v6 image for TigxOS 1.3.8.
 
 Layout:
   LBA 512      : superblock
