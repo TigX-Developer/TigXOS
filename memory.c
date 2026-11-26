@@ -751,11 +751,13 @@ void *dma_alloc_pages(size_t pages, uintptr_t *phys_out)
     if (!p)
         return 0;
     uintptr_t phys = (uintptr_t)p;
-    /* Reject >4GiB for 32-bit DMA devices (should not happen on our PMM). */
+#if defined(__x86_64__)
+    /* 32-bit bus masters cannot DMA above 4 GiB. */
     if (phys >= 0x100000000ULL) {
         pmm_free_frames(p, pages);
         return 0;
     }
+#endif
     if (phys_out)
         *phys_out = phys;
     return p;

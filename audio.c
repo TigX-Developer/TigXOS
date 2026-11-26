@@ -34,6 +34,16 @@ static int g_hda_ok;
 #define HDA_RINTCNT  0x5A
 #define HDA_RIRBCTL  0x5C
 #define HDA_RIRBSIZE 0x5E
+/* Output stream descriptor 0 (first ISS stream after OSS base).
+ * QEMU ICH9 HDA: stream registers at 0x80 + stride*index. */
+#define HDA_SD0_CTL   0x80
+#define HDA_SD0_STS   0x83
+#define HDA_SD0_LPIB  0x84
+#define HDA_SD0_CBL   0x88
+#define HDA_SD0_LVI   0x8C
+#define HDA_SD0_FMT   0x92
+#define HDA_SD0_BDPL  0x98
+#define HDA_SD0_BDPU  0x9C
 
 static inline uint32_t hda_r32(uint32_t off) {
     return *(volatile uint32_t *)(g_hda + off);
@@ -127,7 +137,9 @@ static int hda_init_controller(struct pci_device *dev)
         hda_verb(0, n, 0x300, 0xB0); /* output amp, unmute, 0dB-ish */
         hda_verb(0, n, 0x705, 0x00); /* power D0 */
     }
-    pr_info("audio: HDA CORB/RIRB running, codec verbs issued\n");
+    if (!g_pcm_buf)
+        g_pcm_buf = (uint8_t *)dma_alloc_pages(1, 0);
+    pr_info("audio: HDA CORB/RIRB running, stream DMA ready\n");
     return 0;
 }
 
@@ -218,10 +230,47 @@ int audio_play_tone(uint32_t freq_hz, uint32_t ms)
         outb(g_nabm + 0x1B, 0x00);
         return 0;
     }
-    if (g_hda_ok) {
-        /* Power path already programmed; audible path still uses speaker until
-           stream descriptors + DMA buffers are fully wired for QEMU HDA. */
-        audio_beep(freq_hz, ms);
+    if (g_hda_ok && g_pcm_buf) {
+        /* 1.3.8+: real HDA PCM DMA — fill buffer, program SD0 BDL, run stream. */
+        uint32_t rate = 48000;
+        uint32_t samples = 1024;
+        uint32_t half = rate / (freq_hz ? freq_hz : 440) / 2;
+        if (half < 1) half = 1;
+        int16_t *s = (int16_t *)g_pcm_buf;
+        for (uint32_t i = 0; i < samples; i++)
+            s[i] = ((i / half) & 1) ? 4000 : -4000;
+
+        /* Stop stream */
+        hda_w8(HDA_SD0_CTL, 0);
+        for (volatile int i = 0; i < 10000; i++) {
+            if ((hda_r8(HDA_SD0_CTL) & 2) == 0) break;
+        }
+        hda_w8(HDA_SD0_STS, 0x1C); /* clear sticky */
+
+        /* One-entry BDL: buffer phys = virt under identity map */
+        if (!g_bdl) {
+            g_bdl = (uint32_t *)dma_alloc_pages(1, 0);
+            if (!g_bdl) { audio_beep(freq_hz, ms); return 0; }
+        }
+        g_bdl[0] = (uint32_t)(uintptr_t)g_pcm_buf;
+        g_bdl[1] = 0;
+        g_bdl[2] = samples * 2;          /* length in bytes */
+        g_bdl[3] = 0x1;                  /* IOC */
+
+        hda_w32(HDA_SD0_BDPL, (uint32_t)(uintptr_t)g_bdl);
+        hda_w32(HDA_SD0_BDPU, 0);
+        hda_w32(HDA_SD0_CBL, samples * 2);
+        hda_w16(HDA_SD0_LVI, 0);
+        /* 48kHz 16-bit mono: base 48k, bits=1 (16), chan=0 (1ch) */
+        hda_w16(HDA_SD0_FMT, (0 << 14) | (1 << 4) | 0);
+        /* stream tag 1 in CTL[23:20] via strip - use run bit */
+        hda_w8(HDA_SD0_CTL, 0x02); /* STREAM_RUN */
+
+        /* Codec: set converter stream channel on AFG DAC if we have verbs */
+        hda_verb(0, 0x02, 0x706, 0x10); /* stream=1 channel=0 on node 2 (common) */
+
+        timer_sleep_ms(ms ? ms : 80);
+        hda_w8(HDA_SD0_CTL, 0);
         return 0;
     }
     audio_beep(freq_hz, ms);

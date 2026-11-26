@@ -194,9 +194,22 @@ int hal_msi_allocate(uint8_t preferred_cpu, struct hal_msi_message *out)
     if (cpu >= g_machine.cpu_count)
         cpu = 0;
 
-    uint32_t apic_id = (cpu == 0) ? g_machine.bsp_apic_id : cpu;
+    /* Resolve logical CPU → APIC ID via MADT (not "cpu index == APIC id"). */
+    uint32_t apic_id = g_machine.bsp_apic_id;
+    {
+        extern const struct acpi_info *acpi_get(void);
+        const struct acpi_info *ai = acpi_get();
+        if (ai && cpu < (uint8_t)ai->cpu_count && ai->cpus[cpu].enabled)
+            apic_id = ai->cpus[cpu].apic_id;
+        else if (cpu == 0)
+            apic_id = g_machine.bsp_apic_id;
+        else
+            apic_id = cpu; /* last-resort guess */
+    }
+    /* MSI address: FEE0_0000h | (APIC_ID << 12) | RH=0 | DM=0 (physical) */
     uint64_t addr = 0xFEE00000ull | ((uint64_t)apic_id << 12);
-    uint32_t data = vector;     /* edge-triggered, fixed delivery */
+    /* MSI data: vector | delivery fixed | edge | assert */
+    uint32_t data = (uint32_t)vector;
 
     out->address = addr;
     out->data    = data;

@@ -9,6 +9,12 @@
 Boots on **i386** and **x86_64**, runs a concurrent shell on **TigFS**, and ships a small native language (**Green Lizard**) that compiles to ELF.
 
 ### Current release — 1.3.8
+- **Full AP scheduling** on x86_64 (LAPIC timer + `schedule` on every online CPU)
+- Process groups vs threads, DMA allocator, ACPI HPET, USB HID key repeat
+- AHCI as preferred root disk (`make run-ahci`), HDA stream DMA, per-core MSI routing
+
+
+### Notes from 1.3.8
 - Kernel size headroom (`-Os` by default, under 511-sector boot limit)
 - HPET base from the ACPI HPET table (fallback `0xFED00000`)
 - DMA-safe contiguous allocator (`dma_alloc` / `dma_free`)

@@ -1,10 +1,8 @@
-/* smp.h — SMP foundation + 1.2.9 IPI / TLB / balance (TigxOS)
+/* smp.h — SMP foundation + full AP scheduling (TigxOS 1.3.8)
  *
- * 1.2.8: discover CPUs, INIT+SIPI, APs park.
- * 1.2.9: IPI (reschedule + TLB shootdown), per-CPU accounting, load-balance
- *        hooks, multicore stress counters. APs still park in the trampoline
- *        until they get a full long-mode entry; IPI delivery is exercised from
- *        the BSP and counted. i386 stays UP.
+ * Discover CPUs (MADT), INIT+SIPI, AP long-mode entry, per-CPU data,
+ * IPI (reschedule + TLB), load-balance hints. APs run schedule() with a
+ * LAPIC timer. i386 stays UP.
  */
 #ifndef TIGX_SMP_H
 #define TIGX_SMP_H

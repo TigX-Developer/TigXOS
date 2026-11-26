@@ -173,6 +173,13 @@ sys.exit('ERROR: kernel.bin exceeds bootloader KERNEL_SECTS') if s>m else None"
 # boot (1 sector) + kernel, pad to LBA 512, then splice pre-built TigFS image.
 os-image.bin: boot.bin kernel.bin tigfs.img
 	python3 tools/mkosimage.py boot.bin kernel.bin tigfs.img $@ "TigxOS V$(VERSION) ($(ARCH_LABEL))"
+# Boot with ICH AHCI so ahci0 is the root block device (still works on ATA if no HBA)
+run-ahci: os-image.bin
+	$(QEMU) -m 128 -smp 2 \
+		-drive id=disk,file=os-image.bin,if=none,format=raw \
+		-device ahci,id=ahci \
+		-device ide-hd,drive=disk,bus=ahci.0
+
 run: os-image.bin
 	$(QEMU) -m 128 -drive file=os-image.bin,format=raw,if=ide,index=0,media=disk
 

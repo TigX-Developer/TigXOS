@@ -1,30 +1,24 @@
-# Build products
+# Build artifacts
 *.o
 *.d
 *.bin
 *.elf
-kernel.elf
+*.img
 os-image.bin
-tigfs.img
-embed_hello.c
+kernel.bin
+kernel.elf
 boot.bin
+embed_hello.c
 .arch-stamp
 .tests-stamp
-qemu.log
-
-# User build outputs
-user/*.o
-user/*.d
-user/*.elf
 user/*.gl.c
+user/*.o
+user/*.elf
 
-# Archives / local packs
-*.tar.gz
-*.zip
-
-# Editor / OS junk
-*~
-*.swp
+# Local / debug noise
+*.log
+qemu-debug.log
+smp2-*.log
+test-*.log
 .DS_Store
-.idea/
-.vscode/
+*~

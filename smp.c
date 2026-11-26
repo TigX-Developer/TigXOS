@@ -1,7 +1,7 @@
-/* smp.c — SMP bring-up, IPI, TLB shootdown, AP park (TigxOS 1.3.8)
+/* smp.c — SMP bring-up, IPI, TLB shootdown, full AP scheduling (TigxOS 1.3.8)
  *
  * x86_64: MADT discovery, SIPI trampoline, AP long-mode entry.
- * APs load kernel GDT/IDT then park on cli;hlt until full AP scheduling.
+ * APs load kernel GDT/IDT, enable LAPIC timer, then run schedule() like the BSP.
  * i386 / no-LAPIC: pure uniprocessor — no INIT/SIPI.
  */
 #include "smp.h"
@@ -100,11 +100,28 @@ static void ap_main(void) {
         }
     }
 
-    pr_info("smp: CPU %d (APIC %u) online - parked idle (no schedule yet)\n", id, lapic_id());
+    pr_info("smp: CPU %d (APIC %u) online - scheduler idle loop\n", id, lapic_id());
 
-    /* Hard park: IF=0. No IPI/timer entry until AP runs a real scheduler. */
+    /*
+     * Full AP scheduling: periodic LAPIC timer on vector 32 (same handler as
+     * PIC IRQ0 on the BSP) drives scheduler_tick → schedule. IPIs also work.
+     * Until work is queued here, the AP idle task just hlt's.
+     */
+    if (lapic_present()) {
+        /* ~100 Hz-ish; exact rate is not calibrated — fine for preemption. */
+        lapic_timer_enable(1000000u, 32);
+    }
+
+    __asm__ volatile("sti" ::: "memory");
     for (;;) {
-        __asm__ volatile("cli; hlt" ::: "memory");
+        /* If the reschedule IPI set need_resched, or timer ran, schedule. */
+        if (smp_need_resched()) {
+            smp_clear_need_resched();
+            schedule();
+        }
+        /* Yield to any READY task pinned to this CPU / global pool. */
+        schedule();
+        __asm__ volatile("sti; hlt" ::: "memory");
     }
 }
 #else
@@ -449,7 +466,7 @@ void smp_send_resched(int cpu) {
     need_resched[cpu] = 1;
     if (cpu == smp_cpu_id())
         return;
-    /* APs are parked (cli;hlt) — do not deliver IPIs or they can fault. */
+    /* APs run the scheduler; IPIs are delivered to all online CPUs. */
     if (cpu != 0)
         return;
     resched_send_gen++;
@@ -515,10 +532,10 @@ void smp_tlb_shootdown(uintptr_t page) {
         if (i == self)
             continue;
         tlb_ack_gen[i] = 0;
-        if (i == 0) send_ipi_vector(i, IPI_VECTOR_TLB); /* skip parked APs */
+        send_ipi_vector(i, IPI_VECTOR_TLB);
         ipi_tlb_total++;
     }
-    /* Brief wait for acks (APs may still be parked — do not spin forever) */
+    /* Brief wait for TLB shootdown acks from other CPUs */
     for (volatile int spin = 0; spin < 50000; spin++) {
         int done = 1;
         for (int i = 0; i < smp_online; i++) {

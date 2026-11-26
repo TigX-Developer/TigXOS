@@ -1,5 +1,6 @@
 /* ahci.c — basic AHCI HBA + port0 read/write (TigxOS 1.3.8 closes 1.3.3 gap) */
 #include "ahci.h"
+#include "interrupt.h"
 #include "pci.h"
 #include "log.h"
 #include "memory.h"
@@ -125,6 +126,11 @@ static int ahci_blk_write(struct block_dev *dev, uint64_t lba, uint32_t count, c
     (void)dev; return ahci_write(lba, count, buf);
 }
 
+static void ahci_msi_isr(struct interrupt_frame *f)
+{
+    (void)f;
+}
+
 void ahci_init(void) {
     g_present = 0;
     g_port = -1;
@@ -189,25 +195,31 @@ void ahci_init(void) {
     g_present = 1;
     pr_info("ahci: port %d online (DMA read/write ready)\n", g_port);
 
-    /* Register as block device and prefer for FS if ATA weak */
+    /* Per-core MSI: route HBA IRQs to CPU 0 when the device supports MSI. */
+    {
+        if (pci_route_msi(&mut, 0, ahci_msi_isr) >= 0)
+            pr_info("ahci: MSI routed to CPU 0\n");
+        else
+            pr_info("ahci: MSI unavailable, staying on INTx\n");
+    }
+
+    /* Register as block device and prefer as root disk. */
     {
         struct block_dev bd;
         memset(&bd, 0, sizeof(bd));
         strncpy(bd.name, "ahci0", sizeof(bd.name) - 1);
         bd.type = BLOCK_DEV_AHCI;
         bd.present = 1;
-        bd.sectors = 0x100000; /* probe size; IDENTIFY later */
+        bd.sectors = 0x100000;
         bd.read = ahci_blk_read;
         bd.write = ahci_blk_write;
         int id = block_register(&bd);
         if (id >= 0) {
             block_set_default(id);
-            pr_info("ahci: set as default block device id=%d\n", id);
+            pr_info("ahci: set as default block device id=%d (root path)\n", id);
         }
     }
-
-
-    }
+}
 
 int ahci_present(void) { return g_present; }
 int ahci_port_count(void) { return g_port >= 0 ? 1 : 0; }

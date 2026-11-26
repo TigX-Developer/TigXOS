@@ -55,15 +55,12 @@ struct proc_group {
 };
 
 /*
- * 1.2.3 process/thread model (1.3.6):
- *   - A *process* owns: address space, open files, cwd, heap, tgid, children.
- *   - A *thread* owns: stack, rsp, state, priority, TLS, on_cpu, time accounting.
- * Historically both lived in struct process. Fields below marked [thread] are
- * the scheduling identity; [process] fields are shared by the thread group.
- * Secondary threads (is_thread=1) share the leader process AS/fds via tgid.
- * Full physical split into two allocations is the next refactor; APIs now
- * treat process_current() as the current thread and process_lookup_pid as
- * either tid or tgid depending on context.
+ * 1.3.8+ process/thread model (true allocation split):
+ *   - struct proc_group  = *process* (AS, fds, cwd, heap, tgid) — one per leader
+ *   - struct process     = *thread*  (stack, rsp, state, prio, TLS, on_cpu)
+ * process_current() is the current *thread*. Shared state goes through
+ * process_group_of() / process_fds() / process_aspace(). Legacy mirror
+ * fields on struct process stay for compat but are synced from the group.
  */
 struct process {
     int pid;             /* [thread] tid; for leaders also tgid */
@@ -186,6 +183,9 @@ void process_group_ref(struct proc_group *g);
 void process_group_unref(struct proc_group *g);
 void process_group_bind_leader(struct process *p, struct address_space *as);
 void process_group_bind_thread(struct process *leader, struct process *thr);
+struct file_desc *process_fds(struct process *t);
+struct address_space *process_aspace(struct process *t);
+char *process_cwd(struct process *t);
 
 #endif
 

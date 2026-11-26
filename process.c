@@ -2,8 +2,8 @@
 
 
 
-extern char boot_stack_top[]; /* defined in the arch entry.asm (.bss) */
 #include "process.h"
+extern char boot_stack_top[]; /* defined in the arch entry.asm (.bss) */
 #include "smp.h"
 #include "filetable.h"
 #include "memory.h"
@@ -145,17 +145,21 @@ void process_init_fds(struct process *p) {
             struct open_file *o = of_get(console_of);
             if (o) {
                 o->type = OF_CONSOLE;
-                /* of_alloc set refs=1; process_init_fds will incref per stdio */
             }
         }
     }
+    struct file_desc *fds = process_fds(p);
+    if (!fds) fds = p->fds;
     for (int i = 0; i < MAX_FDS; i++)
-        p->fds[i].of_id = -1;
+        fds[i].of_id = -1;
     for (int i = 0; i < 3; i++) {
-        p->fds[i].of_id = console_of;
+        fds[i].of_id = console_of;
         if (console_of >= 0)
             of_incref(console_of);
     }
+    /* Mirror into thread-local copy for compat */
+    for (int i = 0; i < MAX_FDS; i++)
+        p->fds[i] = fds[i];
     /* Drop the of_alloc baseline ref once (first process only keeps it via stdio).
      * Subsequent processes only of_incref. */
     static int console_base_dropped;
@@ -185,8 +189,10 @@ void process_inherit_fds(struct process *child, struct process *parent) {
 
 int process_alloc_fd(struct process *p) {
     if (!p) return -1;
+    struct file_desc *fds = process_fds(p);
+    if (!fds) fds = p->fds;
     for (int i = 3; i < MAX_FDS; i++) {
-        if (p->fds[i].of_id < 0)
+        if (fds[i].of_id < 0)
             return i;
     }
     return -1;
@@ -195,9 +201,12 @@ int process_alloc_fd(struct process *p) {
 void fd_close(struct process *p, int fd) {
     if (!p || fd < 0 || fd >= MAX_FDS)
         return;
-    int id = p->fds[fd].of_id;
+    struct file_desc *fds = process_fds(p);
+    if (!fds) fds = p->fds;
+    int id = fds[fd].of_id;
     if (id < 0)
         return;
+    fds[fd].of_id = -1;
     p->fds[fd].of_id = -1;
     of_decref(id);
 }
@@ -205,7 +214,9 @@ void fd_close(struct process *p, int fd) {
 int fd_type_of(struct process *p, int fd) {
     if (!p || fd < 0 || fd >= MAX_FDS)
         return FD_NONE;
-    struct open_file *o = of_get(p->fds[fd].of_id);
+    struct file_desc *fds = process_fds(p);
+    if (!fds) fds = p->fds;
+    struct open_file *o = of_get(fds[fd].of_id);
     if (!o) return FD_NONE;
     if (o->type == OF_CONSOLE) return FD_CONSOLE;
     if (o->type == OF_FILE) return FD_FILE;
@@ -346,6 +357,8 @@ int process_prepare_ap_idle(int cpu_id) {
     p->parent_pid = -1;
     p->wait_pid = -1;
     process_init_fds(p);
+    if (!p->group && !p->is_thread)
+        process_group_bind_leader(p, p->as);
     {
         char nm[PROCESS_NAME_LEN];
         nm[0] = 'i'; nm[1] = 'd'; nm[2] = 'l'; nm[3] = 'e'; nm[4] = '-';
@@ -456,6 +469,8 @@ int process_create(const char *name, void (*entry)(void)) {
     p->wait_pid = -1;
     p->exit_status = 0;
     process_init_fds(p);
+    if (!p->group && !p->is_thread)
+        process_group_bind_leader(p, p->as);
     p->time_slice = TIME_SLICE_TICKS;
     p->priority = PRIO_DEFAULT;
     p->ticks_ran = 0;
@@ -578,6 +593,9 @@ int process_create_user(const char *name, void (*user_entry)(void)) {
         strncpy(p->cwd, "/", PATH_MAX - 1);
         p->cwd[PATH_MAX - 1] = '\0';
     }
+    /* True process allocation: leader owns a proc_group */
+    if (!p->is_thread)
+        process_group_bind_leader(p, p->as);
     irq_restore(cf_);
     return p->pid;
 }
@@ -654,6 +672,9 @@ int process_create_user_at(const char *name, uintptr_t entry, uintptr_t user_sp)
         strncpy(p->cwd, "/", PATH_MAX - 1);
         p->cwd[PATH_MAX - 1] = '\0';
     }
+    /* True process allocation: leader owns a proc_group */
+    if (!p->is_thread)
+        process_group_bind_leader(p, p->as);
     irq_restore(cf_);
     return p->pid;
 }
@@ -1445,8 +1466,21 @@ void process_reset_ticks(void) {
 /* ---- 1.2.9: affinity + load pick ---- */
 
 int process_pick_cpu(void) {
-    /* Until APs run the scheduler, pin every new task to the BSP. */
-    return 0;
+    /* Prefer the least-loaded online CPU (run-queue depth hint). */
+    int best = 0;
+    int best_depth = 0x7fffffff;
+    int n = smp_cpu_count();
+    if (n < 1) n = 1;
+    for (int i = 0; i < n && i < NCPU_MAX; i++) {
+        if (!cpus[i].online && i != 0)
+            continue;
+        int d = smp_rq_depth(i);
+        if (d < best_depth) {
+            best_depth = d;
+            best = i;
+        }
+    }
+    return best;
 }
 
 int process_set_affinity(int pid, int cpu) {
@@ -1820,6 +1854,28 @@ struct proc_group *process_group_of(struct process *t)
     return t ? t->group : 0;
 }
 
+struct file_desc *process_fds(struct process *t)
+{
+    if (!t) return 0;
+    if (t->group) return t->group->fds;
+    return t->fds;
+}
+
+struct address_space *process_aspace(struct process *t)
+{
+    if (!t) return 0;
+    if (t->group && t->group->as) return t->group->as;
+    return t->as;
+}
+
+char *process_cwd(struct process *t)
+{
+    if (!t) return 0;
+    if (t->group) return t->group->cwd;
+    return t->cwd;
+}
+
+
 /* Bind a newly created leader thread to a fresh group (call after pid/tgid set). */
 void process_group_bind_leader(struct process *p, struct address_space *as)
 {
@@ -1832,15 +1888,21 @@ void process_group_bind_leader(struct process *p, struct address_space *as)
     g->as = as;
     p->group = g;
     p->as = as;
-    if (!p->group) process_group_bind_leader(p, as); /* compat mirror */
-    /* copy cwd default */
+    /* Own fds live in the group — copy leader stdio into group. */
+    for (int i = 0; i < MAX_FDS; i++)
+        g->fds[i] = p->fds[i];
     if (p->cwd[0]) {
         int i;
         for (i = 0; i < PATH_MAX - 1 && p->cwd[i]; i++)
             g->cwd[i] = p->cwd[i];
         g->cwd[i] = 0;
+    } else {
+        g->cwd[0] = '/'; g->cwd[1] = 0;
     }
+    g->heap_brk = p->heap_brk;
+    g->heap_limit = p->heap_limit;
 }
+
 
 void process_group_bind_thread(struct process *leader, struct process *thr)
 {

@@ -128,3 +128,9 @@ void pci_dump_all(void);
 #endif
 
 #endif /* TIGX_PCI_H */
+
+/* Route device interrupts to a specific CPU via MSI (preferred) or MSI-X.
+ * Registers IDT handler for the allocated vector. Returns vector or -1. */
+struct interrupt_frame;
+int pci_route_msi(struct pci_device *dev, uint8_t preferred_cpu,
+                  void (*handler)(struct interrupt_frame *));

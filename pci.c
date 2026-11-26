@@ -1,6 +1,7 @@
 /* pci.c — PCI enumeration + MSI/MSI-X (TigxOS 1.3.8) */
 
 #include "pci.h"
+#include "interrupt.h"
 #include "hal.h"
 #include "console.h"
 #include "string.h"
@@ -466,4 +467,24 @@ void pci_dump_all(void)
     kprintf("=== PCI devices (%zu) ===\n", g_count);
     for (size_t i = 0; i < g_count; i++)
         pci_dump_device(&g_devices[i]);
+}
+
+
+int pci_route_msi(struct pci_device *dev, uint8_t preferred_cpu,
+                  void (*handler)(struct interrupt_frame *))
+{
+    if (!dev || !handler)
+        return -1;
+    struct hal_msi_message msg;
+    int rc = -1;
+    if (dev->cap_msix)
+        rc = pci_enable_msix(dev, preferred_cpu, &msg);
+    if (rc != 0 && dev->cap_msi)
+        rc = pci_enable_msi(dev, preferred_cpu, &msg);
+    if (rc != 0)
+        return -1;
+    register_interrupt_handler(msg.vector, handler);
+    pr_info("pci: MSI vector %u -> CPU %u APIC (dev %02x:%02x.%x)\n",
+            msg.vector, msg.cpu, dev->bus, dev->slot, dev->func);
+    return (int)msg.vector;
 }

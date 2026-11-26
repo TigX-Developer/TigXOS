@@ -143,7 +143,7 @@ static long sys_write(struct process *cur, long fd, uintptr_t buf, size_t len) {
         return SY_EINVAL;
     if (len && !user_range_ok(buf, len))
         return SY_EFAULT;
-    struct open_file *o = of_get(cur->fds[fd].of_id);
+    struct open_file *o = of_get(process_fds(cur)[fd].of_id);
     if (!o)
         return -1;
     if (o->type == OF_CONSOLE) {
@@ -219,7 +219,7 @@ static long sys_read(struct process *cur, long fd, uintptr_t buf, size_t len) {
         return 0;
     if (!user_range_writable(buf, len))
         return -1;
-    struct open_file *o = of_get(cur->fds[fd].of_id);
+    struct open_file *o = of_get(process_fds(cur)[fd].of_id);
     if (!o)
         return -1;
     if (o->type == OF_CONSOLE) {
@@ -330,7 +330,7 @@ static long sys_open(struct process *cur, uintptr_t pathu, long flags) {
         of_decref(of);
         return -1;
     }
-    cur->fds[fd].of_id = of;
+    process_fds(cur)[fd].of_id = of;
     return fd;
 }
 
@@ -339,7 +339,7 @@ static long sys_close(struct process *cur, long fd) {
         return SY_EINVAL;
     if (fd < 0 || fd >= MAX_FDS)
         return SY_EBADF;
-    if (cur->fds[fd].of_id < 0)
+    if (process_fds(cur)[fd].of_id < 0)
         return -1;
     fd_close(cur, (int)fd);
     return 0;
@@ -348,13 +348,13 @@ static long sys_close(struct process *cur, long fd) {
 static long sys_dup(struct process *cur, long oldfd) {
     if (!cur || oldfd < 0 || oldfd >= MAX_FDS)
         return -1;
-    int oid = cur->fds[oldfd].of_id;
+    int oid = process_fds(cur)[oldfd].of_id;
     if (oid < 0)
         return -1;
     int nfd = process_alloc_fd(cur);
     if (nfd < 0)
         return -1;
-    cur->fds[nfd].of_id = oid;
+    process_fds(cur)[nfd].of_id = oid;
     of_incref(oid);
     return nfd;
 }
@@ -362,14 +362,14 @@ static long sys_dup(struct process *cur, long oldfd) {
 static long sys_dup2(struct process *cur, long oldfd, long newfd) {
     if (!cur || oldfd < 0 || oldfd >= MAX_FDS || newfd < 0 || newfd >= MAX_FDS)
         return -1;
-    int oid = cur->fds[oldfd].of_id;
+    int oid = process_fds(cur)[oldfd].of_id;
     if (oid < 0)
         return -1;
     if (oldfd == newfd)
         return newfd;
-    if (cur->fds[newfd].of_id >= 0)
+    if (process_fds(cur)[newfd].of_id >= 0)
         fd_close(cur, (int)newfd);
-    cur->fds[newfd].of_id = oid;
+    process_fds(cur)[newfd].of_id = oid;
     of_incref(oid);
     return newfd;
 }
@@ -383,26 +383,26 @@ static long sys_pipe(struct process *cur, uintptr_t pipefdu) {
     int of_r = of_alloc();
     if (of_r < 0)
         return -1;
-    cur->fds[rfd].of_id = of_r;
+    process_fds(cur)[rfd].of_id = of_r;
 
     int wfd = process_alloc_fd(cur);
     if (wfd < 0) {
-        cur->fds[rfd].of_id = -1;
+        process_fds(cur)[rfd].of_id = -1;
         of_decref(of_r);
         return -1;
     }
     int of_w = of_alloc();
     if (of_w < 0) {
-        cur->fds[rfd].of_id = -1;
+        process_fds(cur)[rfd].of_id = -1;
         of_decref(of_r);
         return -1;
     }
-    cur->fds[wfd].of_id = of_w; /* claim slot early */
+    process_fds(cur)[wfd].of_id = of_w; /* claim slot early */
 
     int pid_ = pipe_alloc();
     if (pid_ < 0) {
-        cur->fds[rfd].of_id = -1;
-        cur->fds[wfd].of_id = -1;
+        process_fds(cur)[rfd].of_id = -1;
+        process_fds(cur)[wfd].of_id = -1;
         of_decref(of_r);
         of_decref(of_w);
         return -1;
@@ -414,8 +414,8 @@ static long sys_pipe(struct process *cur, uintptr_t pipefdu) {
         extern void pipe_decref(int pipe_id, int is_write);
         pipe_decref(pid_, 0);
         pipe_decref(pid_, 1);
-        cur->fds[rfd].of_id = -1;
-        cur->fds[wfd].of_id = -1;
+        process_fds(cur)[rfd].of_id = -1;
+        process_fds(cur)[wfd].of_id = -1;
         of_decref(of_r);
         of_decref(of_w);
         return -1;
@@ -428,8 +428,8 @@ static long sys_pipe(struct process *cur, uintptr_t pipefdu) {
     ow->pipe_id = pid_;
     int fds[2] = { rfd, wfd };
     if (copy_to_user(pipefdu, fds, sizeof(fds)) != 0) {
-        cur->fds[rfd].of_id = -1;
-        cur->fds[wfd].of_id = -1;
+        process_fds(cur)[rfd].of_id = -1;
+        process_fds(cur)[wfd].of_id = -1;
         of_decref(of_r);
         of_decref(of_w);
         return -1;
